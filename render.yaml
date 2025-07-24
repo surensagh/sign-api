@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: text-to-sign-api
+    env: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: MAX_TEXT_LENGTH
+        value: "500"
+      - key: API_TIMEOUT
+        value: "120"
+      # Optional: Configure these if you're using them
+      - key: BROWSERLESS_URL
+        value: https://your-browserless-instance  # or remove if not used
+      - key: SELENIUM_GRID_URL
+        value: http://selenium:4444/wd/hub       # or remove if not used
+      - key: REDIS_URL
+        value: redis://your-redis-host:6379       # optional, fallback is memory
+      - key: AWS_S3_BUCKET
+        value: your-bucket-name                   # optional
+      - key: AWS_ACCESS_KEY_ID
+        value: your-access-key                    # optional
+      - key: AWS_SECRET_ACCESS_KEY
+        value: your-secret-key                    # optional
+      - key: AWS_REGION
+        value: us-east-1

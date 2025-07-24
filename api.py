@@ -1,6 +1,6 @@
-# FastAPI Text-to-Sign API - Converted from Flask
+# FastAPI Text-to-Sign API - Deployment Ready Version
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 import os
@@ -9,36 +9,68 @@ import time
 import base64
 import json
 import requests
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import TimeoutException, WebDriverException
-import logging
 import asyncio
+import aiohttp
+import logging
 from typing import Optional, Dict, Any
+from contextlib import asynccontextmanager
+import tempfile
+import shutil
+from pathlib import Path
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI app instance
-app = FastAPI(
-    title="Text-to-Sign Translation API",
-    description="Convert text to sign language videos using sign.mt",
-    version="2.0.0"
-)
+# Configuration from environment variables
+class Config:
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+    AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET")
+    AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+    AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+    USE_S3 = bool(AWS_S3_BUCKET and AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)
+    MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
+    API_TIMEOUT = int(os.getenv("API_TIMEOUT", "120"))
+    SELENIUM_GRID_URL = os.getenv("SELENIUM_GRID_URL")  # Optional: for Selenium Grid
+    BROWSERLESS_URL = os.getenv("BROWSERLESS_URL")      # Optional: for Browserless.io
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure as needed
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+config = Config()
+
+# Optional imports based on configuration
+storage_backend = None
+redis_client = None
+
+try:
+    if config.USE_S3:
+        import boto3
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=config.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
+            region_name=config.AWS_REGION
+        )
+        storage_backend = "s3"
+        logger.info("Using S3 for file storage")
+    else:
+        storage_backend = "local"
+        logger.info("Using local file storage")
+except ImportError:
+    storage_backend = "local"
+    logger.warning("boto3 not available, falling back to local storage")
+
+try:
+    import redis
+    redis_client = redis.from_url(config.REDIS_URL, decode_responses=True)
+    # Test connection
+    redis_client.ping()
+    logger.info("Connected to Redis for state management")
+except (ImportError, redis.ConnectionError):
+    logger.warning("Redis not available, using in-memory storage")
+    redis_client = None
+
+# In-memory fallback storage
+translations: Dict[str, Dict[str, Any]] = {}
 
 # Pydantic models
 class TranslationRequest(BaseModel):
@@ -50,8 +82,8 @@ class TranslationRequest(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError('Text cannot be empty')
-        if len(v) > 500:
-            raise ValueError('Text too long (max 500 characters)')
+        if len(v) > config.MAX_TEXT_LENGTH:
+            raise ValueError(f'Text too long (max {config.MAX_TEXT_LENGTH} characters)')
         return v
 
 class TranslationResponse(BaseModel):
@@ -70,479 +102,381 @@ class APIStatus(BaseModel):
     status: str
     active_translations: int
     total_translations: int
-    upload_folder: str
+    storage_backend: str
+    state_backend: str
 
 class HealthCheck(BaseModel):
     status: str
     timestamp: float
+    version: str
 
-# Global storage (in production, use Redis or database)
-translations: Dict[str, Dict[str, Any]] = {}
-UPLOAD_FOLDER = './sign_translations'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-def setup_driver(headless=True):
-    """Set up Chrome driver with working options"""
-    options = Options()
-    if headless:
-        options.add_argument("--headless")
-    
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--enable-logging")
-    options.add_argument("--log-level=3")
-    options.add_argument("--disable-background-timer-throttling")
-    options.add_argument("--disable-backgrounding-occluded-windows")
-    options.add_argument("--disable-renderer-backgrounding")
-    
-    options.add_experimental_option('excludeSwitches', ['enable-logging'])
-    options.add_experimental_option('useAutomationExtension', False)
-    options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
-    
-    try:
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(30)
-        driver.set_script_timeout(20)
-        return driver
-    except Exception as e:
-        logger.error(f"Failed to create driver: {e}")
-        raise
-
-def find_text_input(driver):
-    """Find text input using the exact same logic from original code"""
-    logger.info("Looking for text input field...")
-    text_input = None
-    input_selectors = [
-        "textarea[placeholder*='text' i]",
-        "textarea[placeholder*='Text' i]", 
-        "textarea",
-        "input[type='text']",
-        ".text-input",
-        "#text-input",
-        "[contenteditable='true']",
-        "input[placeholder*='text' i]",
-        "input[placeholder*='word' i]"
-    ]
-    
-    for i, selector in enumerate(input_selectors):
-        try:
-            logger.info(f"  Trying selector {i+1}/{len(input_selectors)}: {selector}")
-            elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            logger.info(f"    Found {len(elements)} elements")
-            
-            for element in elements:
-                if element.is_displayed() and element.is_enabled():
-                    text_input = element
-                    logger.info(f"    Found usable input field with selector: {selector}")
-                    return text_input
-                    
-        except Exception as e:
-            logger.warning(f"    Error with selector {selector}: {e}")
-            continue
-    
-    return text_input
-
-def trigger_translation(driver, text_input, text):
-    """Trigger translation using the same methods from original code"""
-    text_input.clear()
-    text_input.send_keys(text)
-    logger.info(f"Entered text: {text}")
-    
-    time.sleep(2)
-    translate_triggered = False
-    
-    # Method 1: Look for translate button
-    try:
-        translate_button = driver.find_element(By.XPATH, "//button[contains(text(), 'Translate') or contains(text(), 'translate')]")
-        if translate_button.is_displayed():
-            translate_button.click()
-            translate_triggered = True
-            logger.info("Clicked translate button")
-    except:
-        pass
-    
-    # Method 2: Press Enter
-    if not translate_triggered:
-        try:
-            text_input.send_keys(Keys.RETURN)
-            translate_triggered = True
-            logger.info("Pressed Enter to translate")
-        except:
-            pass
-    
-    return translate_triggered
-
-def find_all_blobs(driver):
-    """Use the exact blob detection from original code"""
-    blob_urls = []
-    
-    # Method 1: JavaScript execution to find all blob URLs
-    try:
-        blob_script = """
-        var elements = document.querySelectorAll('*');
-        var blobs = [];
-        for (var i = 0; i < elements.length; i++) {
-            var el = elements[i];
-            if (el.src && el.src.startsWith('blob:')) {
-                blobs.push(el.src);
-            }
-            if (el.href && el.href.startsWith('blob:')) {
-                blobs.push(el.href);
-            }
-            var style = window.getComputedStyle(el);
-            if (style.backgroundImage && style.backgroundImage.includes('blob:')) {
-                var match = style.backgroundImage.match(/blob:[^)]+/);
-                if (match) blobs.push(match[0]);
-            }
-        }
-        return [...new Set(blobs)]; // Remove duplicates
-        """
+# Storage utilities
+class StorageManager:
+    def __init__(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="sign_translations_")
         
-        page_blobs = driver.execute_script(blob_script)
-        blob_urls.extend(page_blobs)
-        logger.info(f"Found {len(page_blobs)} blobs via JavaScript")
-        
-    except Exception as e:
-        logger.error(f"Error finding blobs via JavaScript: {e}")
-    
-    # Method 2: Element scanning
-    try:
-        media_elements = driver.find_elements(By.CSS_SELECTOR, "video, img, source, canvas")
-        logger.info(f"Scanning {len(media_elements)} media elements...")
-        
-        for element in media_elements:
+    async def save_file(self, file_content: bytes, filename: str) -> str:
+        """Save file and return download URL or file path"""
+        if storage_backend == "s3":
             try:
-                attributes_to_check = ["src", "data-src", "srcset", "data-url"]
-                for attr in attributes_to_check:
-                    attr_value = element.get_attribute(attr)
-                    if attr_value and attr_value.startswith('blob:'):
-                        blob_urls.append(attr_value)
-            except:
-                continue
-                
-    except Exception as e:
-        logger.error(f"Error scanning media elements: {e}")
-    
-    # Method 3: Performance logs
-    try:
-        logs = driver.get_log('performance')
-        for log in logs:
-            message = json.loads(log['message'])
-            if message['message']['method'] == 'Network.responseReceived':
-                url = message['message']['params']['response']['url']
-                if url.startswith('blob:'):
-                    blob_urls.append(url)
-    except Exception as e:
-        logger.error(f"Error checking performance logs: {e}")
-    
-    unique_blobs = list(set(blob_urls))
-    if unique_blobs:
-        logger.info(f"Total unique blobs found: {len(unique_blobs)}")
-        for i, blob in enumerate(unique_blobs):
-            logger.info(f"  Blob {i+1}: {blob}")
-    
-    return unique_blobs
-
-def trigger_page_interactions(driver):
-    """Use the exact interaction triggers from original code"""
-    try:
-        body = driver.find_element(By.TAG_NAME, "body")
-        body.click()
-        time.sleep(1)
-        
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
-        driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(1)
-        
-        clickable_elements = driver.find_elements(By.CSS_SELECTOR, "video, canvas, .video-container, .translation-result")
-        for elem in clickable_elements[:3]:
-            try:
-                if elem.is_displayed():
-                    driver.execute_script("arguments[0].click();", elem)
-                    time.sleep(0.5)
-            except:
-                continue
-        
-        time.sleep(3)
-        
-    except Exception as e:
-        logger.error(f"Error triggering page interactions: {e}")
-
-def download_content_from_session(driver, url, word, save_path):
-    """Use the exact download logic from original code"""
-    try:
-        logger.info(f"Downloading content from: {url}")
-        
-        if url.startswith('blob:'):
-            blob_script = f"""
-            return new Promise((resolve) => {{
-                const timeoutId = setTimeout(() => resolve(null), 15000);
-                
-                fetch('{url}')
-                    .then(response => {{
-                        if (!response.ok) throw new Error('Network response was not ok');
-                        return response.blob();
-                    }})
-                    .then(blob => {{
-                        const reader = new FileReader();
-                        reader.onloadend = function() {{
-                            clearTimeout(timeoutId);
-                            resolve(reader.result);
-                        }};
-                        reader.onerror = function(err) {{
-                            clearTimeout(timeoutId);
-                            resolve(null);
-                        }};
-                        reader.readAsDataURL(blob);
-                    }})
-                    .catch(err => {{
-                        clearTimeout(timeoutId);
-                        resolve(null);
-                    }});
-            }});
-            """
-            
-            try:
-                base64_data = driver.execute_async_script(blob_script)
+                s3_client.put_object(
+                    Bucket=config.AWS_S3_BUCKET,
+                    Key=filename,
+                    Body=file_content,
+                    ContentType='video/webm'
+                )
+                return f"s3://{config.AWS_S3_BUCKET}/{filename}"
             except Exception as e:
-                logger.error(f"Error executing blob download script: {e}")
-                simple_blob_script = f"""
-                var callback = arguments[0];
-                fetch('{url}')
-                    .then(r => r.blob())
-                    .then(blob => {{
-                        var reader = new FileReader();
-                        reader.onload = () => callback(reader.result);
-                        reader.onerror = () => callback(null);
-                        reader.readAsDataURL(blob);
-                    }})
-                    .catch(() => callback(null));
-                """
-                try:
-                    base64_data = driver.execute_async_script(simple_blob_script)
-                except:
-                    base64_data = None
-            
-            if base64_data and base64_data.startswith('data:'):
-                header, data = base64_data.split(',', 1)
-                
-                if 'image/gif' in header:
-                    ext = '.gif'
-                elif 'video/mp4' in header:
-                    ext = '.mp4'
-                elif 'video/webm' in header:
-                    ext = '.webm'
-                else:
-                    ext = '.webm'
-                
-                safe_word = "".join(c for c in word if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                safe_word = safe_word.replace(' ', '_')
-                filename = f"{safe_word}_sign_translation_{uuid.uuid4().hex[:8]}{ext}"
-                filepath = os.path.join(save_path, filename)
-                
-                with open(filepath, 'wb') as f:
-                    f.write(base64.b64decode(data))
-                
-                file_size = os.path.getsize(filepath)
-                logger.info(f"Successfully saved blob content to: {filepath} ({file_size} bytes)")
-                return filepath
-            else:
-                logger.warning("Could not extract valid base64 data from blob")
-                return None
-        
-        else:
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                ext = '.gif' if '.gif' in url else '.mp4'
-                safe_word = "".join(c for c in word if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                safe_word = safe_word.replace(' ', '_')
-                filename = f"{safe_word}_sign_translation_{uuid.uuid4().hex[:8]}{ext}"
-                filepath = os.path.join(save_path, filename)
-                
-                with open(filepath, 'wb') as f:
-                    f.write(response.content)
-                
-                logger.info(f"Successfully downloaded to: {filepath}")
-                return filepath
-        
-    except Exception as e:
-        logger.error(f"Error downloading content: {e}")
-    
-    return None
-
-def get_additional_urls(driver):
-    """Get video and GIF URLs from performance logs"""
-    video_urls = []
-    gif_urls = []
-    
-    try:
-        logs = driver.get_log('performance')
-        for log in logs:
-            message = json.loads(log['message'])
-            if message['message']['method'] == 'Network.responseReceived':
-                url = message['message']['params']['response']['url']
-                mime_type = message['message']['params']['response'].get('mimeType', '')
-                
-                if any(skip in url.lower() for skip in ['manifest', 'favicon', '.css', '.js', '.html', '.txt']):
-                    continue
-                
-                if any(ext in url.lower() for ext in ['.gif', '.mp4', '.webm', '.mov']):
-                    if '.gif' in url.lower():
-                        gif_urls.append(url)
-                    else:
-                        video_urls.append(url)
-                elif any(mime in mime_type.lower() for mime in ['video/', 'image/gif']):
-                    if 'gif' in mime_type.lower():
-                        gif_urls.append(url)
-                    else:
-                        video_urls.append(url)
-    except Exception as e:
-        logger.error(f"Error reading performance logs: {e}")
-    
-    return list(set(video_urls)), list(set(gif_urls))
-
-def translate_text_to_sign(text, save_path, max_retries=3):
-    """Main translation function using original code logic"""
-    driver = None
-    try:
-        logger.info(f"Starting translation for: '{text}'")
-        driver = setup_driver(headless=True)
-        
-        logger.info("Navigating to sign.mt...")
-        driver.get("https://sign.mt/")
-        
-        wait = WebDriverWait(driver, 15)
-        logger.info("Page loaded, waiting 3 seconds...")
-        time.sleep(3)
-        
-        logger.info(f"Current page title: {driver.title}")
-        logger.info(f"Current URL: {driver.current_url}")
-        
-        text_input = find_text_input(driver)
-        if not text_input:
-            raise Exception("Could not find text input field")
-        
-        if not trigger_translation(driver, text_input, text):
-            logger.warning("Could not explicitly trigger translation, relying on auto-translation")
-        
-        word_count = len(text.split())
-        base_wait_time = max(8, word_count * 3)
-        logger.info(f"Waiting for translation ({word_count} words, {base_wait_time}s base wait)...")
-        
-        blob_urls = []
-        for attempt in range(max_retries):
-            logger.info(f"Blob detection attempt {attempt + 1}/{max_retries}")
-            
-            wait_time = base_wait_time + (attempt * 5)
-            
-            for i in range(wait_time):
-                time.sleep(1)
-                if i % 3 == 0:
-                    try:
-                        video_elements = driver.find_elements(By.CSS_SELECTOR, "video, img[src*='blob:']")
-                        if any(elem.get_attribute("src") and elem.get_attribute("src").startswith("blob:") for elem in video_elements):
-                            logger.info(f"  Translation appears ready after {i+1}s (attempt {attempt + 1})")
-                            break
-                    except:
-                        pass
-            
-            blob_urls = find_all_blobs(driver)
-            
-            if blob_urls:
-                logger.info(f"Found {len(blob_urls)} blob URLs on attempt {attempt + 1}")
-                break
-            else:
-                logger.info(f"No blobs found on attempt {attempt + 1}")
-                if attempt < max_retries - 1:
-                    logger.info("Triggering page interactions and retrying...")
-                    trigger_page_interactions(driver)
-        
-        video_urls, gif_urls = get_additional_urls(driver)
-        
-        primary_url = None
-        if blob_urls:
-            primary_url = blob_urls[0]
-        elif gif_urls:
-            primary_url = gif_urls[0]
-        elif video_urls:
-            primary_url = video_urls[0]
-        
-        if not primary_url:
-            raise Exception("No video content found after translation")
-        
-        logger.info(f"Primary URL found: {primary_url}")
-        
-        filepath = download_content_from_session(driver, primary_url, text, save_path)
-        
-        if not filepath:
-            raise Exception("Failed to download video content")
-        
-        return filepath
-        
-    except Exception as e:
-        logger.error(f"Translation failed: {e}")
-        raise
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
+                logger.error(f"S3 upload failed: {e}")
+                # Fallback to local
                 pass
+        
+        # Local storage
+        file_path = Path(self.temp_dir) / filename
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        return str(file_path)
+    
+    async def get_file(self, file_path: str) -> Optional[bytes]:
+        """Retrieve file content"""
+        if file_path.startswith("s3://"):
+            try:
+                bucket, key = file_path[5:].split("/", 1)
+                response = s3_client.get_object(Bucket=bucket, Key=key)
+                return response['Body'].read()
+            except Exception as e:
+                logger.error(f"S3 download failed: {e}")
+                return None
+        else:
+            try:
+                with open(file_path, 'rb') as f:
+                    return f.read()
+            except FileNotFoundError:
+                return None
+
+# State management utilities
+class StateManager:
+    @staticmethod
+    async def get_translation(translation_id: str) -> Optional[Dict[str, Any]]:
+        if redis_client:
+            try:
+                data = redis_client.hgetall(f"translation:{translation_id}")
+                if data:
+                    # Convert string timestamps back to float
+                    if 'created_at' in data:
+                        data['created_at'] = float(data['created_at'])
+                    return data
+            except Exception as e:
+                logger.error(f"Redis get error: {e}")
+        
+        return translations.get(translation_id)
+    
+    @staticmethod
+    async def set_translation(translation_id: str, data: Dict[str, Any]):
+        if redis_client:
+            try:
+                # Convert non-string values for Redis
+                redis_data = {k: str(v) if v is not None else '' for k, v in data.items()}
+                redis_client.hset(f"translation:{translation_id}", mapping=redis_data)
+                redis_client.expire(f"translation:{translation_id}", 86400)  # 24 hours
+                return
+            except Exception as e:
+                logger.error(f"Redis set error: {e}")
+        
+        translations[translation_id] = data
+    
+    @staticmethod
+    async def get_all_translations() -> Dict[str, Dict[str, Any]]:
+        if redis_client:
+            try:
+                keys = redis_client.keys("translation:*")
+                result = {}
+                for key in keys:
+                    translation_id = key.split(":", 1)[1]
+                    data = redis_client.hgetall(key)
+                    if data and 'created_at' in data:
+                        data['created_at'] = float(data['created_at'])
+                    result[translation_id] = data
+                return result
+            except Exception as e:
+                logger.error(f"Redis get_all error: {e}")
+        
+        return translations
+
+# Browser automation using HTTP API (Browserless or similar)
+class BrowserlessAutomation:
+    def __init__(self):
+        self.base_url = config.BROWSERLESS_URL or "http://localhost:3000"
+    
+    async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
+        """Use browserless.io or similar service for browser automation"""
+        script = f'''
+        const page = await browser.newPage();
+        
+        try {{
+            await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
+            await page.waitForTimeout(3000);
+            
+            // Find and fill text input
+            const textInput = await page.waitForSelector('textarea, input[type="text"]');
+            await textInput.clear();
+            await textInput.type('{text}');
+            
+            // Trigger translation
+            try {{
+                const translateBtn = await page.$('button:contains("Translate")');
+                if (translateBtn) await translateBtn.click();
+                else await textInput.press('Enter');
+            }} catch (e) {{
+                await textInput.press('Enter');
+            }}
+            
+            // Wait for video content
+            await page.waitForTimeout(10000);
+            
+            // Look for blob URLs
+            const blobUrls = await page.evaluate(() => {{
+                const elements = document.querySelectorAll('*');
+                const blobs = [];
+                for (let i = 0; i < elements.length; i++) {{
+                    const el = elements[i];
+                    if (el.src && el.src.startsWith('blob:')) {{
+                        blobs.push(el.src);
+                    }}
+                }}
+                return blobs;
+            }});
+            
+            if (blobUrls.length === 0) {{
+                throw new Error('No video content found');
+            }}
+            
+            // Download the first blob
+            const videoBuffer = await page.evaluate(async (blobUrl) => {{
+                const response = await fetch(blobUrl);
+                const blob = await response.blob();
+                const arrayBuffer = await blob.arrayBuffer();
+                return Array.from(new Uint8Array(arrayBuffer));
+            }}, blobUrls[0]);
+            
+            return Buffer.from(videoBuffer);
+            
+        }} finally {{
+            await page.close();
+        }}
+        '''
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "code": script,
+                    "context": {"text": text}
+                }
+                
+                async with session.post(
+                    f"{self.base_url}/function",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=config.API_TIMEOUT)
+                ) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        return content
+                    else:
+                        logger.error(f"Browserless API error: {response.status}")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"Browser automation failed: {e}")
+            return None
+
+# Selenium Grid fallback
+class SeleniumGridAutomation:
+    def __init__(self):
+        self.grid_url = config.SELENIUM_GRID_URL or "http://localhost:4444/wd/hub"
+    
+    async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
+        """Use Selenium Grid for browser automation"""
+        try:
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.keys import Keys
+            
+            options = Options()
+            options.add_argument("--headless")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            
+            driver = webdriver.Remote(
+                command_executor=self.grid_url,
+                options=options
+            )
+            
+            try:
+                driver.get("https://sign.mt/")
+                time.sleep(3)
+                
+                # Find text input
+                text_input = driver.find_element(By.CSS_SELECTOR, "textarea, input[type='text']")
+                text_input.clear()
+                text_input.send_keys(text)
+                text_input.send_keys(Keys.RETURN)
+                
+                # Wait for translation
+                time.sleep(10)
+                
+                # Find blob URLs
+                blob_script = """
+                var elements = document.querySelectorAll('*');
+                var blobs = [];
+                for (var i = 0; i < elements.length; i++) {
+                    var el = elements[i];
+                    if (el.src && el.src.startsWith('blob:')) {
+                        blobs.push(el.src);
+                    }
+                }
+                return blobs;
+                """
+                
+                blob_urls = driver.execute_script(blob_script)
+                
+                if not blob_urls:
+                    return None
+                
+                # Download blob content
+                download_script = f"""
+                return new Promise((resolve) => {{
+                    fetch('{blob_urls[0]}')
+                        .then(r => r.blob())
+                        .then(blob => {{
+                            var reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        }})
+                        .catch(() => resolve(null));
+                }});
+                """
+                
+                base64_data = driver.execute_async_script(download_script)
+                
+                if base64_data and base64_data.startswith('data:'):
+                    header, data = base64_data.split(',', 1)
+                    return base64.b64decode(data)
+                
+                return None
+                
+            finally:
+                driver.quit()
+                
+        except Exception as e:
+            logger.error(f"Selenium Grid automation failed: {e}")
+            return None
+
+# Initialize automation backend
+automation_backend = None
+if config.BROWSERLESS_URL:
+    automation_backend = BrowserlessAutomation()
+    logger.info("Using Browserless for browser automation")
+elif config.SELENIUM_GRID_URL:
+    automation_backend = SeleniumGridAutomation()
+    logger.info("Using Selenium Grid for browser automation")
+else:
+    logger.warning("No browser automation backend configured")
+
+# Global instances
+storage_manager = StorageManager()
+
+# Lifespan context manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting FastAPI Text-to-Sign API (Deployment Ready)")
+    yield
+    # Cleanup
+    if hasattr(storage_manager, 'temp_dir'):
+        shutil.rmtree(storage_manager.temp_dir, ignore_errors=True)
+
+# FastAPI app instance
+app = FastAPI(
+    title="Text-to-Sign Translation API",
+    description="Convert text to sign language videos - Deployment Ready",
+    version="3.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 async def process_translation_async(translation_id: str, text: str):
-    """Process translation in background - runs in thread pool"""
+    """Process translation in background"""
     try:
         logger.info(f"Processing translation {translation_id}: {text}")
         
-        # Run the blocking Selenium operation in a thread pool
-        loop = asyncio.get_event_loop()
-        file_path = await loop.run_in_executor(
-            None, 
-            translate_text_to_sign, 
-            text, 
-            UPLOAD_FOLDER
-        )
+        if not automation_backend:
+            raise Exception("No browser automation backend available")
         
-        if file_path and os.path.exists(file_path):
-            translations[translation_id].update({
-                'status': 'completed',
-                'file_path': file_path
-            })
-            logger.info(f"Translation {translation_id} completed successfully")
-        else:
-            translations[translation_id].update({
-                'status': 'failed',
-                'error': 'Failed to generate or save video file'
-            })
-            logger.error(f"Translation {translation_id} failed - no file generated")
-            
+        # Perform the translation
+        video_content = await automation_backend.translate_text_to_sign(text)
+        
+        if not video_content:
+            raise Exception("Failed to generate video content")
+        
+        # Save the file
+        safe_text = "".join(c for c in text if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_text = safe_text.replace(' ', '_')[:50]  # Limit filename length
+        filename = f"{safe_text}_sign_{uuid.uuid4().hex[:8]}.webm"
+        
+        file_path = await storage_manager.save_file(video_content, filename)
+        
+        await StateManager.set_translation(translation_id, {
+            'status': 'completed',
+            'text': text,
+            'file_path': file_path,
+            'error': None,
+            'created_at': time.time()
+        })
+        
+        logger.info(f"Translation {translation_id} completed successfully")
+        
     except Exception as e:
         error_msg = str(e)
-        translations[translation_id].update({
+        await StateManager.set_translation(translation_id, {
             'status': 'failed',
-            'error': error_msg
+            'text': text,
+            'file_path': None,
+            'error': error_msg,
+            'created_at': time.time()
         })
-        logger.error(f"Translation {translation_id} failed with error: {error_msg}")
+        logger.error(f"Translation {translation_id} failed: {error_msg}")
 
 # FastAPI Routes
 @app.post("/api/translate", response_model=TranslationResponse)
 async def translate_text(request: TranslationRequest, background_tasks: BackgroundTasks):
     """Start a new text-to-sign translation"""
+    if not automation_backend:
+        raise HTTPException(
+            status_code=503, 
+            detail="Browser automation service not available. Please configure BROWSERLESS_URL or SELENIUM_GRID_URL."
+        )
+    
     text = request.text
     translation_id = str(uuid.uuid4())
     
-    translations[translation_id] = {
+    await StateManager.set_translation(translation_id, {
         'status': 'processing',
         'text': text,
         'file_path': None,
         'error': None,
         'created_at': time.time()
-    }
+    })
 
-    # Add the async task to background tasks
     background_tasks.add_task(process_translation_async, translation_id, text)
 
     return TranslationResponse(
@@ -554,10 +488,11 @@ async def translate_text(request: TranslationRequest, background_tasks: Backgrou
 @app.get("/api/translation/{translation_id}", response_model=TranslationStatus)
 async def get_translation_status(translation_id: str):
     """Get the status of a translation"""
-    if translation_id not in translations:
+    translation = await StateManager.get_translation(translation_id)
+    
+    if not translation:
         raise HTTPException(status_code=404, detail='Translation not found')
 
-    translation = translations[translation_id]
     response = TranslationStatus(
         translation_id=translation_id,
         status=translation['status'],
@@ -574,54 +509,72 @@ async def get_translation_status(translation_id: str):
 @app.get("/api/download/{translation_id}")
 async def download_translation(translation_id: str):
     """Download the translated sign video"""
-    if translation_id not in translations:
+    translation = await StateManager.get_translation(translation_id)
+    
+    if not translation:
         raise HTTPException(status_code=404, detail='Translation not found')
 
-    translation = translations[translation_id]
     if translation['status'] != 'completed' or not translation['file_path']:
         raise HTTPException(status_code=400, detail='Translation not ready')
 
-    if not os.path.exists(translation['file_path']):
+    file_content = await storage_manager.get_file(translation['file_path'])
+    
+    if not file_content:
         raise HTTPException(status_code=404, detail='File not found')
 
-    return FileResponse(
-        path=translation['file_path'],
+    def generate():
+        yield file_content
+
+    return StreamingResponse(
+        generate(),
         media_type='video/webm',
-        filename=os.path.basename(translation['file_path'])
+        headers={"Content-Disposition": f"attachment; filename=sign_translation_{translation_id}.webm"}
     )
 
 @app.get("/api/status", response_model=APIStatus)
 async def api_status():
     """Get API status information"""
+    all_translations = await StateManager.get_all_translations()
+    
     return APIStatus(
         status='online',
-        active_translations=len([t for t in translations.values() if t['status'] == 'processing']),
-        total_translations=len(translations),
-        upload_folder=UPLOAD_FOLDER
+        active_translations=len([t for t in all_translations.values() if t.get('status') == 'processing']),
+        total_translations=len(all_translations),
+        storage_backend=storage_backend,
+        state_backend="redis" if redis_client else "memory"
     )
 
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
     """Health check endpoint"""
-    return HealthCheck(status='healthy', timestamp=time.time())
+    return HealthCheck(
+        status='healthy', 
+        timestamp=time.time(),
+        version="3.0.0"
+    )
 
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
     return {
-        "message": "Text-to-Sign Translation API",
-        "version": "2.0.0",
+        "message": "Text-to-Sign Translation API - Deployment Ready",
+        "version": "3.0.0",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "features": {
+            "storage": storage_backend,
+            "state_management": "redis" if redis_client else "memory",
+            "browser_automation": "browserless" if config.BROWSERLESS_URL else "selenium_grid" if config.SELENIUM_GRID_URL else "none"
+        }
     }
 
 if __name__ == '__main__':
     import uvicorn
-    logger.info("Starting FastAPI Text-to-Sign API...")
+    logger.info("Starting FastAPI Text-to-Sign API (Deployment Ready)...")
     uvicorn.run(
-        "api:app",  # Changed from "main:app" to "api:app"
+        "api:app",
         host="0.0.0.0",
-        port=8000,
-        reload=False,  # Set to True for development
-        workers=1  # Keep at 1 due to Selenium driver management
+        port=int(os.getenv("PORT", "8000")),
+        reload=False,
+        workers=int(os.getenv("WORKERS", "1"))
     )
