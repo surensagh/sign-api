@@ -2,6 +2,6 @@ services:
   - type: web
     name: my-api
     runtime: python
-    buildCommand: ""
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn api:app --host 0.0.0.0 --port 10000
     plan: free
