@@ -219,59 +219,63 @@ class BrowserlessAutomation:
     async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
         """Use browserless.io or similar service for browser automation"""
         script = f'''
-        const page = await browser.newPage();
-        
-        try {{
-            await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
-            await page.waitForTimeout(3000);
+        async function processSignTranslation() {{
+            const page = await browser.newPage();
             
-            // Find and fill text input
-            const textInput = await page.waitForSelector('textarea, input[type="text"]');
-            await textInput.clear();
-            await textInput.type('{text}');
-            
-            // Trigger translation
             try {{
-                const translateBtn = await page.$('button:contains("Translate")');
-                if (translateBtn) await translateBtn.click();
-                else await textInput.press('Enter');
-            }} catch (e) {{
-                await textInput.press('Enter');
-            }}
-            
-            // Wait for video content
-            await page.waitForTimeout(10000);
-            
-            // Look for blob URLs
-            const blobUrls = await page.evaluate(() => {{
-                const elements = document.querySelectorAll('*');
-                const blobs = [];
-                for (let i = 0; i < elements.length; i++) {{
-                    const el = elements[i];
-                    if (el.src && el.src.startsWith('blob:')) {{
-                        blobs.push(el.src);
-                    }}
+                await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
+                await page.waitForTimeout(3000);
+                
+                // Find and fill text input
+                const textInput = await page.waitForSelector('textarea, input[type="text"]');
+                await textInput.clear();
+                await textInput.type('{text}');
+                
+                // Trigger translation
+                try {{
+                    const translateBtn = await page.$('button:contains("Translate")');
+                    if (translateBtn) await translateBtn.click();
+                    else await textInput.press('Enter');
+                }} catch (e) {{
+                    await textInput.press('Enter');
                 }}
-                return blobs;
-            }});
-            
-            if (blobUrls.length === 0) {{
-                throw new Error('No video content found');
+                
+                // Wait for video content
+                await page.waitForTimeout(10000);
+                
+                // Look for blob URLs
+                const blobUrls = await page.evaluate(() => {{
+                    const elements = document.querySelectorAll('*');
+                    const blobs = [];
+                    for (let i = 0; i < elements.length; i++) {{
+                        const el = elements[i];
+                        if (el.src && el.src.startsWith('blob:')) {{
+                            blobs.push(el.src);
+                        }}
+                    }}
+                    return blobs;
+                }});
+                
+                if (blobUrls.length === 0) {{
+                    throw new Error('No video content found');
+                }}
+                
+                // Download the first blob
+                const videoBuffer = await page.evaluate(async (blobUrl) => {{
+                    const response = await fetch(blobUrl);
+                    const blob = await response.blob();
+                    const arrayBuffer = await blob.arrayBuffer();
+                    return Array.from(new Uint8Array(arrayBuffer));
+                }}, blobUrls[0]);
+                
+                return Buffer.from(videoBuffer);
+                
+            }} finally {{
+                await page.close();
             }}
-            
-            // Download the first blob
-            const videoBuffer = await page.evaluate(async (blobUrl) => {{
-                const response = await fetch(blobUrl);
-                const blob = await response.blob();
-                const arrayBuffer = await blob.arrayBuffer();
-                return Array.from(new Uint8Array(arrayBuffer));
-            }}, blobUrls[0]);
-            
-            return Buffer.from(videoBuffer);
-            
-        }} finally {{
-            await page.close();
         }}
+        
+        return await processSignTranslation();
         '''
         
         try:
