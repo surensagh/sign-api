@@ -219,7 +219,7 @@ class BrowserlessAutomation:
     async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
         """Use browserless.io or similar service for browser automation"""
         script = f'''
-export default async ({ page }) => {{
+export default async ({{ page }}) => {{
     await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
     await page.waitForTimeout(3000);
     
@@ -288,7 +288,11 @@ export default async ({ page }) => {{
                 ) as response:
                     if response.status == 200:
                         content = await response.read()
-                        return content
+                        if content:
+                            return content
+                        else:
+                            logger.error("Browserless returned empty response")
+                            return None
                     else:
                         # Get detailed error response
                         error_text = await response.text()
