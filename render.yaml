@@ -7,7 +7,7 @@ services:
     plan: free
     envVars:
       - key: BROWSERLESS_URL
-        value: https://chrome.browserless.io
+        value: https://production-sfo.browserless.io
       - key: BROWSERLESS_TOKEN
         sync: false  # This will be set manually in Render dashboard
       - key: MAX_TEXT_LENGTH
