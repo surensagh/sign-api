@@ -389,6 +389,12 @@ class SeleniumGridAutomation:
 
 # Initialize automation backend
 automation_backend = None
+
+# Debug logging for environment variables
+logger.info(f"BROWSERLESS_URL: {config.BROWSERLESS_URL}")
+logger.info(f"BROWSERLESS_TOKEN: {'***set***' if config.BROWSERLESS_TOKEN else 'NOT SET'}")
+logger.info(f"SELENIUM_GRID_URL: {config.SELENIUM_GRID_URL}")
+
 if config.BROWSERLESS_URL and config.BROWSERLESS_TOKEN:
     automation_backend = BrowserlessAutomation()
     logger.info("Using Browserless for browser automation")
