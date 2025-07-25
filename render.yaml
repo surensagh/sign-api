@@ -1,50 +1,16 @@
 services:
   - type: web
-    name: text-to-sign-api
-    env: python
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-      if [ "$USE_PLAYWRIGHT" = "true" ]; then
-        playwright install chromium
-      fi
+    name: my-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
-    plan: starter  # or free, starter, standard, pro
+    plan: free
     envVars:
-      # Core API Configuration
-      - key: PORT
-        value: 10000
-      - key: WORKERS
-        value: 1
+      - key: BROWSERLESS_URL
+        value: https://chrome.browserless.io
+      - key: BROWSERLESS_TOKEN
+        sync: false  # This will be set manually in Render dashboard
       - key: MAX_TEXT_LENGTH
         value: 500
       - key: API_TIMEOUT
         value: 120
-      
-      # Browser Automation - Browserless.io (Recommended)
-      - key: BROWSERLESS_URL
-        value: https://chrome.browserless.io
-      - key: BROWSERLESS_API_KEY
-        value: 2SjuZpd2MGU96wX627e005ded52d1b619fb389cc14eed8d9d
-      
-      # Optional: Use Playwright instead (requires more resources)
-      # - key: USE_PLAYWRIGHT
-      #   value: true
-      
-      # Optional: Selenium Grid (if you have your own grid)
-      # - key: SELENIUM_GRID_URL
-      #   value: http://your-selenium-grid:4444/wd/hub
-      
-      # Optional: Redis for state management (recommended for production)
-      # - key: REDIS_URL
-      #   value: redis://your-redis-instance:6379
-      
-      # Optional: AWS S3 for file storage (recommended for production)
-      # - key: AWS_S3_BUCKET
-      #   sync: false  # Set in dashboard
-      # - key: AWS_ACCESS_KEY_ID
-      #   sync: false  # Set in dashboard
-      # - key: AWS_SECRET_ACCESS_KEY
-      #   sync: false  # Set in dashboard
-      # - key: AWS_REGION
-      #   value: us-east-1
