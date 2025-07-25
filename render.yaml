@@ -1,7 +1,57 @@
 services:
   - type: web
-    name: my-api
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api:app --host 0.0.0.0 --port 10000
-    plan: free
+    name: text-to-sign-api
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      if [ "$USE_PLAYWRIGHT" = "true" ]; then
+        playwright install chromium
+      fi
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    plan: starter  # or free, starter, standard, pro
+    envVars:
+      # Core API Configuration
+      - key: PORT
+        value: 10000
+      - key: WORKERS
+        value: 1
+      - key: MAX_TEXT_LENGTH
+        value: 500
+      - key: API_TIMEOUT
+        value: 120
+      
+      # Browser Automation - Choose ONE of these options:
+      
+      # Option 1: Browserless.io (Recommended for production)
+      - key: BROWSERLESS_URL
+        value: https://chrome.browserless.io  # or your custom instance
+      - key: BROWSERLESS_API_KEY
+        sync: false  # Set this in Render dashboard
+      
+      # Option 2: Use Playwright (requires more resources)
+      # - key: USE_PLAYWRIGHT
+      #   value: true
+      
+      # Option 3: Selenium Grid (if you have your own grid)
+      # - key: SELENIUM_GRID_URL
+      #   value: http://your-selenium-grid:4444/wd/hub
+      
+      # Optional: Redis for state management (recommended for production)
+      # - key: REDIS_URL
+      #   value: redis://your-redis-instance:6379
+      
+      # Optional: AWS S3 for file storage (recommended for production)
+      # - key: AWS_S3_BUCKET
+      #   sync: false  # Set in dashboard
+      # - key: AWS_ACCESS_KEY_ID
+      #   sync: false  # Set in dashboard
+      # - key: AWS_SECRET_ACCESS_KEY
+      #   sync: false  # Set in dashboard
+      # - key: AWS_REGION
+      #   value: us-east-1
+
+# Optional: Redis service (uncomment if you want Redis on Render)
+# - type: redis
+#   name: text-to-sign-redis
+#   plan: starter
+#   maxmemoryPolicy: allkeys-lru

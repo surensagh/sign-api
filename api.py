@@ -1,4 +1,4 @@
-# FastAPI Text-to-Sign API - Deployment Ready Version
+# FastAPI Text-to-Sign API - Fixed Version with Better Error Handling
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,8 +32,10 @@ class Config:
     USE_S3 = bool(AWS_S3_BUCKET and AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)
     MAX_TEXT_LENGTH = int(os.getenv("MAX_TEXT_LENGTH", "500"))
     API_TIMEOUT = int(os.getenv("API_TIMEOUT", "120"))
-    SELENIUM_GRID_URL = os.getenv("SELENIUM_GRID_URL")  # Optional: for Selenium Grid
-    BROWSERLESS_URL = os.getenv("BROWSERLESS_URL")      # Optional: for Browserless.io
+    SELENIUM_GRID_URL = os.getenv("SELENIUM_GRID_URL")
+    BROWSERLESS_URL = os.getenv("BROWSERLESS_URL")
+    BROWSERLESS_API_KEY = os.getenv("BROWSERLESS_API_KEY")
+    USE_PLAYWRIGHT = os.getenv("USE_PLAYWRIGHT", "false").lower() == "true"
 
 config = Config()
 
@@ -203,64 +205,231 @@ class StateManager:
         
         return translations
 
-# Browser automation using HTTP API (Browserless or similar)
+# Playwright automation (local)
+class PlaywrightAutomation:
+    def __init__(self):
+        self.playwright = None
+        
+    async def initialize(self):
+        """Initialize Playwright"""
+        try:
+            from playwright.async_api import async_playwright
+            self.playwright = await async_playwright().start()
+            return True
+        except ImportError:
+            logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
+            return False
+    
+    async def cleanup(self):
+        """Cleanup Playwright"""
+        if self.playwright:
+            await self.playwright.stop()
+    
+    async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
+        """Use Playwright for browser automation"""
+        if not self.playwright:
+            if not await self.initialize():
+                return None
+            
+        try:
+            browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            page = await browser.new_page()
+            
+            try:
+                logger.info("Navigating to sign.mt...")
+                await page.goto('https://sign.mt/', wait_until='networkidle', timeout=30000)
+                await page.wait_for_timeout(3000)
+                
+                # Find and fill text input
+                logger.info("Finding text input...")
+                text_input = await page.wait_for_selector('textarea, input[type="text"], [contenteditable="true"]', timeout=10000)
+                await text_input.click()
+                await page.keyboard.select_all()
+                await page.keyboard.type(text)
+                
+                # Trigger translation
+                logger.info("Triggering translation...")
+                try:
+                    translate_btn = await page.query_selector('button[type="submit"], button:has-text("Translate"), .translate-btn, #translate')
+                    if translate_btn:
+                        await translate_btn.click()
+                    else:
+                        await page.keyboard.press('Enter')
+                except:
+                    await page.keyboard.press('Enter')
+                
+                # Wait for video generation
+                logger.info("Waiting for video generation...")
+                await page.wait_for_timeout(15000)
+                
+                # Find blob URLs
+                blob_urls = await page.evaluate('''
+                    () => {
+                        const elements = document.querySelectorAll('*');
+                        const blobs = [];
+                        for (let i = 0; i < elements.length; i++) {
+                            const el = elements[i];
+                            if (el.src && el.src.startsWith('blob:')) {
+                                blobs.push(el.src);
+                            }
+                            if (el.href && el.href.startsWith('blob:')) {
+                                blobs.push(el.href);
+                            }
+                        }
+                        return blobs;
+                    }
+                ''')
+                
+                logger.info(f"Found {len(blob_urls)} blob URLs")
+                
+                if not blob_urls:
+                    logger.error("No video content found")
+                    return None
+                
+                # Download blob content
+                logger.info("Downloading video content...")
+                video_content = await page.evaluate(f'''
+                    async () => {{
+                        try {{
+                            const response = await fetch('{blob_urls[0]}');
+                            if (!response.ok) throw new Error('Fetch failed');
+                            const blob = await response.blob();
+                            const arrayBuffer = await blob.arrayBuffer();
+                            return Array.from(new Uint8Array(arrayBuffer));
+                        }} catch (error) {{
+                            console.error('Download error:', error);
+                            throw error;
+                        }}
+                    }}
+                ''')
+                
+                logger.info(f"Downloaded {len(video_content)} bytes")
+                return bytes(video_content)
+                
+            finally:
+                await browser.close()
+                
+        except Exception as e:
+            logger.error(f"Playwright automation failed: {e}")
+            return None
+
+# Browser automation using HTTP API (Browserless)
 class BrowserlessAutomation:
     def __init__(self):
         self.base_url = config.BROWSERLESS_URL or "http://localhost:3000"
-    
+        self.api_key = config.BROWSERLESS_API_KEY
+        
     async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
         """Use browserless.io or similar service for browser automation"""
+        
+        # Escape text for JavaScript
+        escaped_text = text.replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
+        
         script = f'''
         const page = await browser.newPage();
         
         try {{
-            await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
-            await page.waitForTimeout(3000);
-            
-            // Find and fill text input
-            const textInput = await page.waitForSelector('textarea, input[type="text"]');
-            await textInput.clear();
-            await textInput.type('{text}');
-            
-            // Trigger translation
-            try {{
-                const translateBtn = await page.$('button:contains("Translate")');
-                if (translateBtn) await translateBtn.click();
-                else await textInput.press('Enter');
-            }} catch (e) {{
-                await textInput.press('Enter');
-            }}
-            
-            // Wait for video content
-            await page.waitForTimeout(10000);
-            
-            // Look for blob URLs
-            const blobUrls = await page.evaluate(() => {{
-                const elements = document.querySelectorAll('*');
-                const blobs = [];
-                for (let i = 0; i < elements.length; i++) {{
-                    const el = elements[i];
-                    if (el.src && el.src.startsWith('blob:')) {{
-                        blobs.push(el.src);
-                    }}
-                }}
-                return blobs;
+            console.log("Navigating to sign.mt...");
+            await page.goto('https://sign.mt/', {{ 
+                waitUntil: 'networkidle2',
+                timeout: 30000 
             }});
             
-            if (blobUrls.length === 0) {{
-                throw new Error('No video content found');
+            console.log("Page loaded, waiting for elements...");
+            await page.waitForTimeout(3000);
+            
+            // Find and fill text input with better selectors
+            const textInput = await page.waitForSelector('textarea, input[type="text"], [contenteditable="true"]', {{
+                timeout: 10000
+            }});
+            
+            console.log("Found text input, filling with text...");
+            await textInput.click();
+            await page.keyboard.selectAll();
+            await page.keyboard.type('{escaped_text}');
+            
+            // Try multiple ways to trigger translation
+            console.log("Triggering translation...");
+            try {{
+                // Look for translate button with various selectors
+                const translateBtn = await page.$('button[type="submit"], button:contains("Translate"), .translate-btn, #translate');
+                if (translateBtn) {{
+                    await translateBtn.click();
+                }} else {{
+                    // Fallback to Enter key
+                    await page.keyboard.press('Enter');
+                }}
+            }} catch (e) {{
+                console.log("Using Enter key fallback");
+                await page.keyboard.press('Enter');
+            }}
+            
+            console.log("Waiting for video generation...");
+            // Wait longer for video content
+            await page.waitForTimeout(15000);
+            
+            // Look for video elements more thoroughly
+            const videoContent = await page.evaluate(() => {{
+                // Check for various video-related elements
+                const videoElements = document.querySelectorAll('video, [src*="blob:"], [href*="blob:"]');
+                const blobUrls = [];
+                
+                videoElements.forEach(el => {{
+                    if (el.src && el.src.startsWith('blob:')) {{
+                        blobUrls.push(el.src);
+                    }}
+                    if (el.href && el.href.startsWith('blob:')) {{
+                        blobUrls.push(el.href);
+                    }}
+                }});
+                
+                // Also check for data URLs or other video sources
+                const allElements = document.querySelectorAll('*');
+                allElements.forEach(el => {{
+                    ['src', 'href', 'data-src'].forEach(attr => {{
+                        const value = el.getAttribute(attr);
+                        if (value && (value.startsWith('blob:') || value.startsWith('data:video/'))) {{
+                            blobUrls.push(value);
+                        }}
+                    }});
+                }});
+                
+                return {{ blobUrls, pageContent: document.body.innerHTML.substring(0, 1000) }};
+            }});
+            
+            console.log(`Found ${{videoContent.blobUrls.length}} blob URLs`);
+            
+            if (videoContent.blobUrls.length === 0) {{
+                console.log("Page content:", videoContent.pageContent);
+                throw new Error('No video content found after translation');
             }}
             
             // Download the first blob
+            console.log("Downloading video content...");
             const videoBuffer = await page.evaluate(async (blobUrl) => {{
-                const response = await fetch(blobUrl);
-                const blob = await response.blob();
-                const arrayBuffer = await blob.arrayBuffer();
-                return Array.from(new Uint8Array(arrayBuffer));
-            }}, blobUrls[0]);
+                try {{
+                    const response = await fetch(blobUrl);
+                    if (!response.ok) {{
+                        throw new Error(`Fetch failed: ${{response.status}}`);
+                    }}
+                    const blob = await response.blob();
+                    const arrayBuffer = await blob.arrayBuffer();
+                    return Array.from(new Uint8Array(arrayBuffer));
+                }} catch (error) {{
+                    console.error("Download error:", error);
+                    throw error;
+                }}
+            }}, videoContent.blobUrls[0]);
             
+            console.log(`Downloaded ${{videoBuffer.length}} bytes`);
             return Buffer.from(videoBuffer);
             
+        }} catch (error) {{
+            console.error("Browser automation error:", error);
+            throw error;
         }} finally {{
             await page.close();
         }}
@@ -268,23 +437,57 @@ class BrowserlessAutomation:
         
         try:
             async with aiohttp.ClientSession() as session:
+                # Prepare headers
+                headers = {'Content-Type': 'application/json'}
+                
+                # Add API key if available
+                if self.api_key:
+                    headers['Authorization'] = f'Bearer {self.api_key}'
+                
+                # Prepare payload
                 payload = {
                     "code": script,
-                    "context": {"text": text}
+                    "context": {"text": escaped_text}
                 }
                 
+                # Determine the correct endpoint
+                endpoint = f"{self.base_url}/function"
+                if self.api_key and not self.base_url.endswith('/function'):
+                    # Some services use different endpoints with API keys
+                    endpoint = f"{self.base_url}/chrome/function"
+                
+                logger.info(f"Making request to: {endpoint}")
+                
                 async with session.post(
-                    f"{self.base_url}/function",
+                    endpoint,
                     json=payload,
+                    headers=headers,
                     timeout=aiohttp.ClientTimeout(total=config.API_TIMEOUT)
                 ) as response:
+                    
+                    response_text = await response.text()
+                    logger.info(f"Browserless response status: {response.status}")
+                    
                     if response.status == 200:
-                        content = await response.read()
+                        content = await response.read() if response.content_type == 'application/octet-stream' else response_text.encode()
                         return content
+                    elif response.status == 403:
+                        logger.error(f"Browserless 403 Forbidden. Response: {response_text[:500]}")
+                        logger.error("This usually means:")
+                        logger.error("1. Missing or invalid API key")
+                        logger.error("2. Exceeded rate limits") 
+                        logger.error("3. Incorrect endpoint URL")
+                        return None
+                    elif response.status == 401:
+                        logger.error("Browserless 401 Unauthorized - Check your API key")
+                        return None
                     else:
-                        logger.error(f"Browserless API error: {response.status}")
+                        logger.error(f"Browserless API error: {response.status} - {response_text[:500]}")
                         return None
                         
+        except asyncio.TimeoutError:
+            logger.error("Browserless request timed out")
+            return None
         except Exception as e:
             logger.error(f"Browser automation failed: {e}")
             return None
@@ -376,7 +579,13 @@ class SeleniumGridAutomation:
 
 # Initialize automation backend
 automation_backend = None
-if config.BROWSERLESS_URL:
+playwright_instance = None
+
+if config.USE_PLAYWRIGHT:
+    playwright_instance = PlaywrightAutomation()
+    automation_backend = playwright_instance
+    logger.info("Using Playwright for browser automation")
+elif config.BROWSERLESS_URL:
     automation_backend = BrowserlessAutomation()
     logger.info("Using Browserless for browser automation")
 elif config.SELENIUM_GRID_URL:
@@ -391,17 +600,26 @@ storage_manager = StorageManager()
 # Lifespan context manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting FastAPI Text-to-Sign API (Deployment Ready)")
+    logger.info("Starting FastAPI Text-to-Sign API (Fixed Version)")
+    
+    # Initialize Playwright if using it
+    if playwright_instance:
+        await playwright_instance.initialize()
+    
     yield
+    
     # Cleanup
+    if playwright_instance:
+        await playwright_instance.cleanup()
+    
     if hasattr(storage_manager, 'temp_dir'):
         shutil.rmtree(storage_manager.temp_dir, ignore_errors=True)
 
 # FastAPI app instance
 app = FastAPI(
     title="Text-to-Sign Translation API",
-    description="Convert text to sign language videos - Deployment Ready",
-    version="3.0.0",
+    description="Convert text to sign language videos - Fixed Version",
+    version="3.1.0",
     lifespan=lifespan
 )
 
@@ -428,6 +646,10 @@ async def process_translation_async(translation_id: str, text: str):
         if not video_content:
             raise Exception("Failed to generate video content")
         
+        # Validate video content
+        if len(video_content) < 1000:
+            raise Exception(f"Video content too small ({len(video_content)} bytes), likely corrupted")
+        
         # Save the file
         safe_text = "".join(c for c in text if c.isalnum() or c in (' ', '-', '_')).strip()
         safe_text = safe_text.replace(' ', '_')[:50]  # Limit filename length
@@ -443,7 +665,7 @@ async def process_translation_async(translation_id: str, text: str):
             'created_at': time.time()
         })
         
-        logger.info(f"Translation {translation_id} completed successfully")
+        logger.info(f"Translation {translation_id} completed successfully ({len(video_content)} bytes)")
         
     except Exception as e:
         error_msg = str(e)
@@ -463,7 +685,7 @@ async def translate_text(request: TranslationRequest, background_tasks: Backgrou
     if not automation_backend:
         raise HTTPException(
             status_code=503, 
-            detail="Browser automation service not available. Please configure BROWSERLESS_URL or SELENIUM_GRID_URL."
+            detail="Browser automation service not available. Please configure BROWSERLESS_URL with API key, USE_PLAYWRIGHT, or SELENIUM_GRID_URL."
         )
     
     text = request.text
@@ -544,33 +766,86 @@ async def api_status():
         state_backend="redis" if redis_client else "memory"
     )
 
+@app.get("/debug/browserless")
+async def debug_browserless():
+    """Debug Browserless configuration"""
+    return {
+        "browserless_url": config.BROWSERLESS_URL,
+        "has_api_key": bool(config.BROWSERLESS_API_KEY),
+        "api_key_preview": f"{config.BROWSERLESS_API_KEY[:10]}..." if config.BROWSERLESS_API_KEY else None,
+        "use_playwright": config.USE_PLAYWRIGHT,
+        "selenium_grid_url": config.SELENIUM_GRID_URL,
+        "automation_backend": type(automation_backend).__name__ if automation_backend else None,
+        "backend_available": automation_backend is not None
+    }
+
+@app.get("/debug/test-browserless")
+async def test_browserless():
+    """Test Browserless connection"""
+    if not isinstance(automation_backend, BrowserlessAutomation):
+        return {"error": "Browserless not configured"}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {'Content-Type': 'application/json'}
+            if config.BROWSERLESS_API_KEY:
+                headers['Authorization'] = f'Bearer {config.BROWSERLESS_API_KEY}'
+            
+            # Simple test script
+            payload = {
+                "code": "return 'Hello from Browserless!';"
+            }
+            
+            endpoint = f"{config.BROWSERLESS_URL}/function"
+            
+            async with session.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                result = await response.text()
+                return {
+                    "status": response.status,
+                    "response": result,
+                    "success": response.status == 200
+                }
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
 @app.get("/health", response_model=HealthCheck)
 async def health_check():
     """Health check endpoint"""
     return HealthCheck(
         status='healthy', 
         timestamp=time.time(),
-        version="3.0.0"
+        version="3.1.0"
     )
 
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
     return {
-        "message": "Text-to-Sign Translation API - Deployment Ready",
-        "version": "3.0.0",
+        "message": "Text-to-Sign Translation API - Fixed Version",
+        "version": "3.1.0",
         "docs": "/docs",
         "health": "/health",
+        "debug": "/debug/browserless",
         "features": {
             "storage": storage_backend,
             "state_management": "redis" if redis_client else "memory",
-            "browser_automation": "browserless" if config.BROWSERLESS_URL else "selenium_grid" if config.SELENIUM_GRID_URL else "none"
+            "browser_automation": type(automation_backend).__name__ if automation_backend else "none",
+            "backends_available": {
+                "browserless": bool(config.BROWSERLESS_URL),
+                "playwright": config.USE_PLAYWRIGHT,
+                "selenium_grid": bool(config.SELENIUM_GRID_URL)
+            }
         }
     }
 
 if __name__ == '__main__':
     import uvicorn
-    logger.info("Starting FastAPI Text-to-Sign API (Deployment Ready)...")
+    logger.info("Starting FastAPI Text-to-Sign API (Fixed Version)...")
     uvicorn.run(
         "api:app",
         host="0.0.0.0",
