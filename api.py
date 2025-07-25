@@ -281,15 +281,15 @@ class BrowserlessAutomation:
                     "context": {"text": text}
                 }
                 
-                headers = {}
+                # Add token as query parameter for Browserless authentication
+                url = f"{self.base_url}/function"
                 if config.BROWSERLESS_TOKEN:
-                    headers['Authorization'] = f'Bearer {config.BROWSERLESS_TOKEN}'
+                    url += f"?token={config.BROWSERLESS_TOKEN}"
                 
                 async with session.post(
-                    f"{self.base_url}/function",
+                    url,
                     json=payload,
-                    timeout=aiohttp.ClientTimeout(total=config.API_TIMEOUT),
-                    headers=headers
+                    timeout=aiohttp.ClientTimeout(total=config.API_TIMEOUT)
                 ) as response:
                     if response.status == 200:
                         content = await response.read()
