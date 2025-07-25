@@ -221,7 +221,7 @@ class BrowserlessAutomation:
         script = f'''
 export default async ({{ page }}) => {{
     await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
-    await page.waitForTimeout(3000);
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
     // Find and fill text input
     const textInput = await page.waitForSelector('textarea, input[type="text"]');
@@ -238,7 +238,7 @@ export default async ({{ page }}) => {{
     }}
     
     // Wait for video content
-    await page.waitForTimeout(10000);
+    await new Promise(resolve => setTimeout(resolve, 10000));
     
     // Look for blob URLs
     const blobUrls = await page.evaluate(() => {{
