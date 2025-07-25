@@ -225,16 +225,33 @@ export default async ({{ page }}) => {{
     
     // Find and fill text input
     const textInput = await page.waitForSelector('textarea, input[type="text"]');
-    await textInput.clear();
-    await textInput.type('{text}');
+    await textInput.click();
+    await textInput.evaluate(el => {{
+        el.value = '';
+        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    }});
+    await textInput.evaluate((el, text) => {{
+        el.value = text;
+        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    }}, '{text}');
     
     // Trigger translation
     try {{
-        const translateBtn = await page.$('button:contains("Translate")');
-        if (translateBtn) await translateBtn.click();
-        else await textInput.press('Enter');
+        const translateBtn = await page.$('button[type="submit"], button:contains("Translate"), input[type="submit"]');
+        if (translateBtn) {{
+            await translateBtn.evaluate(btn => btn.click());
+        }} else {{
+            await textInput.evaluate(el => {{
+                const event = new KeyboardEvent('keydown', {{ key: 'Enter', code: 'Enter' }});
+                el.dispatchEvent(event);
+            }});
+        }}
     }} catch (e) {{
-        await textInput.press('Enter');
+        await textInput.evaluate(el => {{
+            const event = new KeyboardEvent('keydown', {{ key: 'Enter', code: 'Enter' }});
+            el.dispatchEvent(event);
+        }});
     }}
     
     // Wait for video content
