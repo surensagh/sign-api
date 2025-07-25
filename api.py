@@ -440,21 +440,16 @@ class BrowserlessAutomation:
                 # Prepare headers
                 headers = {'Content-Type': 'application/json'}
                 
-                # Add API key if available
-                if self.api_key:
-                    headers['Authorization'] = f'Bearer {self.api_key}'
-                
                 # Prepare payload
                 payload = {
                     "code": script,
                     "context": {"text": escaped_text}
                 }
                 
-                # Determine the correct endpoint
+                # Build endpoint URL with token parameter
                 endpoint = f"{self.base_url}/function"
-                if self.api_key and not self.base_url.endswith('/function'):
-                    # Some services use different endpoints with API keys
-                    endpoint = f"{self.base_url}/chrome/function"
+                if self.api_key:
+                    endpoint = f"{endpoint}?token={self.api_key}"
                 
                 logger.info(f"Making request to: {endpoint}")
                 
@@ -474,12 +469,12 @@ class BrowserlessAutomation:
                     elif response.status == 403:
                         logger.error(f"Browserless 403 Forbidden. Response: {response_text[:500]}")
                         logger.error("This usually means:")
-                        logger.error("1. Missing or invalid API key")
+                        logger.error("1. Missing or invalid token parameter")
                         logger.error("2. Exceeded rate limits") 
                         logger.error("3. Incorrect endpoint URL")
                         return None
                     elif response.status == 401:
-                        logger.error("Browserless 401 Unauthorized - Check your API key")
+                        logger.error("Browserless 401 Unauthorized - Check your token")
                         return None
                     else:
                         logger.error(f"Browserless API error: {response.status} - {response_text[:500]}")
@@ -788,15 +783,16 @@ async def test_browserless():
     try:
         async with aiohttp.ClientSession() as session:
             headers = {'Content-Type': 'application/json'}
-            if config.BROWSERLESS_API_KEY:
-                headers['Authorization'] = f'Bearer {config.BROWSERLESS_API_KEY}'
             
             # Simple test script
             payload = {
                 "code": "return 'Hello from Browserless!';"
             }
             
+            # Build endpoint URL with token parameter
             endpoint = f"{config.BROWSERLESS_URL}/function"
+            if config.BROWSERLESS_API_KEY:
+                endpoint = f"{endpoint}?token={config.BROWSERLESS_API_KEY}"
             
             async with session.post(
                 endpoint,
@@ -808,7 +804,8 @@ async def test_browserless():
                 return {
                     "status": response.status,
                     "response": result,
-                    "success": response.status == 200
+                    "success": response.status == 200,
+                    "endpoint": endpoint.replace(config.BROWSERLESS_API_KEY or "", "***TOKEN***")
                 }
     except Exception as e:
         return {"error": str(e), "success": False}

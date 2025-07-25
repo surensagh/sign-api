@@ -1,7 +1,7 @@
 # Core FastAPI dependencies
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
+fastapi==0.108.0
+uvicorn[standard]==0.25.0
+pydantic==2.6.1
 
 # HTTP client for browser automation
 aiohttp==3.9.1
@@ -14,10 +14,10 @@ redis==5.0.1
 boto3==1.34.0
 
 # Optional: Selenium for browser automation
-selenium==4.15.2
+selenium==4.16.0
 
 # Optional: Playwright for browser automation (alternative)
-playwright==1.40.0
+playwright==1.41.0
 
 # Standard library extensions
 python-multipart==0.0.6

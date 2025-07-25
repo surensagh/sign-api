@@ -3,6 +3,7 @@ services:
     name: text-to-sign-api
     env: python
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
       if [ "$USE_PLAYWRIGHT" = "true" ]; then
         playwright install chromium
@@ -20,19 +21,17 @@ services:
       - key: API_TIMEOUT
         value: 120
       
-      # Browser Automation - Choose ONE of these options:
-      
-      # Option 1: Browserless.io (Recommended for production)
+      # Browser Automation - Browserless.io (Recommended)
       - key: BROWSERLESS_URL
-        value: https://chrome.browserless.io  # or your custom instance
+        value: https://chrome.browserless.io
       - key: BROWSERLESS_API_KEY
-        sync: false  # Set this in Render dashboard
+        value: 2SjuZpd2MGU96wX627e005ded52d1b619fb389cc14eed8d9d
       
-      # Option 2: Use Playwright (requires more resources)
+      # Optional: Use Playwright instead (requires more resources)
       # - key: USE_PLAYWRIGHT
       #   value: true
       
-      # Option 3: Selenium Grid (if you have your own grid)
+      # Optional: Selenium Grid (if you have your own grid)
       # - key: SELENIUM_GRID_URL
       #   value: http://your-selenium-grid:4444/wd/hub
       
@@ -49,9 +48,3 @@ services:
       #   sync: false  # Set in dashboard
       # - key: AWS_REGION
       #   value: us-east-1
-
-# Optional: Redis service (uncomment if you want Redis on Render)
-# - type: redis
-#   name: text-to-sign-redis
-#   plan: starter
-#   maxmemoryPolicy: allkeys-lru
