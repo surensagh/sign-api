@@ -295,7 +295,9 @@ class BrowserlessAutomation:
                         content = await response.read()
                         return content
                     else:
-                        logger.error(f"Browserless API error: {response.status}")
+                        # Get detailed error response
+                        error_text = await response.text()
+                        logger.error(f"Browserless API error {response.status}: {error_text}")
                         return None
                         
         except Exception as e:

@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Language Translation API Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        input, button {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .result {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+        .success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .info {
+            background-color: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        .loading {
+            text-align: center;
+            color: #007bff;
+        }
+        video {
+            width: 100%;
+            max-width: 500px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤟 Sign Language Translation API Test</h1>
+        
+        <div>
+            <input type="text" id="textInput" placeholder="Enter text to translate to sign language..." value="hello world">
+            <button id="translateBtn" onclick="startTranslation()">Translate to Sign Language</button>
+        </div>
+
+        <div id="result"></div>
+        <div id="videoContainer"></div>
+    </div>
+
+    <script>
+        const API_BASE = 'https://sign-api-r91e.onrender.com';
+        let currentTranslationId = null;
+        let statusCheckInterval = null;
+
+        function showResult(message, type = 'info') {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = `<div class="result ${type}">${message}</div>`;
+        }
+
+        function showLoading(message) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = `<div class="result loading">${message}</div>`;
+        }
+
+        async function startTranslation() {
+            const text = document.getElementById('textInput').value.trim();
+            const btn = document.getElementById('translateBtn');
+            
+            if (!text) {
+                showResult('Please enter some text to translate', 'error');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Translating...';
+            document.getElementById('videoContainer').innerHTML = '';
+
+            try {
+                showLoading('Starting translation...');
+                
+                const response = await fetch(`${API_BASE}/api/translate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ text: text })
+                });
+
+                const data = await response.json();
+                
+                if (response.ok) {
+                    currentTranslationId = data.translation_id;
+                    showResult(`Translation started! ID: ${data.translation_id}`, 'success');
+                    checkTranslationStatus();
+                } else {
+                    showResult(`Error: ${JSON.stringify(data)}`, 'error');
+                    resetButton();
+                }
+            } catch (error) {
+                showResult(`Network error: ${error.message}`, 'error');
+                resetButton();
+            }
+        }
+
+        async function checkTranslationStatus() {
+            if (!currentTranslationId) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/translation/${currentTranslationId}`);
+                const data = await response.json();
+
+                if (response.ok) {
+                    if (data.status === 'completed') {
+                        showResult(`Translation completed! 🎉`, 'success');
+                        showVideoDownload();
+                        resetButton();
+                    } else if (data.status === 'failed') {
+                        showResult(`Translation failed: ${data.error}`, 'error');
+                        resetButton();
+                    } else if (data.status === 'processing') {
+                        showLoading('Processing translation... Please wait...');
+                        // Check again in 3 seconds
+                        setTimeout(checkTranslationStatus, 3000);
+                    }
+                } else {
+                    showResult(`Status check error: ${JSON.stringify(data)}`, 'error');
+                    resetButton();
+                }
+            } catch (error) {
+                showResult(`Status check failed: ${error.message}`, 'error');
+                resetButton();
+            }
+        }
+
+        function showVideoDownload() {
+            const videoContainer = document.getElementById('videoContainer');
+            const downloadUrl = `${API_BASE}/api/download/${currentTranslationId}`;
+            
+            videoContainer.innerHTML = `
+                <div class="result success">
+                    <h3>🎬 Your Sign Language Video is Ready!</h3>
+                    <p><a href="${downloadUrl}" download="sign_translation.webm" style="color: #007bff; text-decoration: none;">
+                        📥 Click here to download the video
+                    </a></p>
+                    <p><small>Note: The video will download as a .webm file that you can play in most modern browsers.</small></p>
+                </div>
+            `;
+        }
+
+        function resetButton() {
+            const btn = document.getElementById('translateBtn');
+            btn.disabled = false;
+            btn.textContent = 'Translate to Sign Language';
+            currentTranslationId = null;
+        }
+
+        // Test API health on page load
+        window.onload = async function() {
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+                if (response.ok) {
+                    showResult(`✅ API is healthy and ready! Status: ${data.status}`, 'success');
+                } else {
+                    showResult('❌ API health check failed', 'error');
+                }
+            } catch (error) {
+                showResult(`❌ Cannot connect to API: ${error.message}`, 'error');
+            }
+        };
+    </script>
+</body>
+</html> 
