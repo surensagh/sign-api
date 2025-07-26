@@ -38,3 +38,4 @@ Thumbs.db
 sign_translations/
 *.log
 chromedriver*
+curl_test.txt

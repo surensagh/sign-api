@@ -240,145 +240,169 @@ export default async ({{ page }}) => {{
     
     console.log('Applying client-provided theme:', useTheme);
     
-    // Apply theme to the website - comprehensive approach
+    // STEP 1: Force browser to emulate the user's color scheme preference
+    await page.emulateMediaFeatures([{{
+        name: 'prefers-color-scheme',
+        value: useTheme
+    }}]);
+    
+    console.log('Browser media preference set to:', useTheme);
+    
+    // STEP 2: ULTRA-AGGRESSIVE theme application
     await page.evaluate((theme) => {{
-        console.log('Setting theme to:', theme);
+        console.log('FORCING theme to:', theme);
         
-        // Method 1: Look for existing theme toggles and click them
-        const themeButtons = document.querySelectorAll(`
-            button[data-theme="${{theme}}"],
-            button[aria-label*="${{theme}}"],
-            .theme-toggle,
-            .dark-mode-toggle,
-            [class*="theme-"],
-            [class*="dark-"],
-            [class*="light-"]
-        `);
+        // 1. Override window.matchMedia IMMEDIATELY
+        const originalMatchMedia = window.matchMedia;
+        window.matchMedia = function(query) {{
+            if (query.includes('prefers-color-scheme')) {{
+                return {{
+                    matches: query.includes('dark') ? theme === 'dark' : theme === 'light',
+                    media: query,
+                    addEventListener: () => {{}},
+                    removeEventListener: () => {{}},
+                    dispatchEvent: () => true
+                }};
+            }}
+            return originalMatchMedia.call(this, query);
+        }};
         
-        // Try clicking theme buttons
+        // 2. Find and AGGRESSIVELY click theme buttons
+        const allElements = document.querySelectorAll('*');
         let themeSet = false;
-        themeButtons.forEach(btn => {{
-            const btnText = btn.textContent?.toLowerCase() || '';
-            const btnClass = btn.className?.toLowerCase() || '';
-            const btnData = btn.getAttribute('data-theme') || '';
+        
+        allElements.forEach(el => {{
+            const text = (el.textContent || '').toLowerCase();
+            const classes = (el.className || '').toLowerCase();
+            const id = (el.id || '').toLowerCase();
+            const role = (el.getAttribute('role') || '').toLowerCase();
+            const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
             
-            if (btnText.includes(theme) || btnClass.includes(theme) || btnData === theme) {{
-                console.log('Clicking theme button:', btn);
-                btn.click();
-                themeSet = true;
+            const isDarkButton = text.includes('dark') || classes.includes('dark') || id.includes('dark') || 
+                               ariaLabel.includes('dark') || text.includes('night') || classes.includes('night');
+            const isLightButton = text.includes('light') || classes.includes('light') || id.includes('light') || 
+                                ariaLabel.includes('light') || text.includes('day') || classes.includes('day');
+            const isThemeButton = text.includes('theme') || classes.includes('theme') || id.includes('theme') ||
+                                role === 'button' || el.tagName === 'BUTTON';
+            
+            if (isThemeButton && ((theme === 'dark' && isDarkButton) || (theme === 'light' && isLightButton))) {{
+                try {{
+                    console.log('CLICKING theme element:', el);
+                    el.click();
+                    themeSet = true;
+                }} catch (e) {{
+                    console.log('Click failed on:', el, e);
+                }}
             }}
         }});
         
-        // Method 2: Set CSS custom properties and variables
-        const root = document.documentElement;
-        root.style.setProperty('--theme', theme);
-        root.style.setProperty('--color-scheme', theme);
-        
-        // Method 3: Apply comprehensive CSS theming
-        const themeStyleId = 'sign-theme-override';
-        let existingStyle = document.getElementById(themeStyleId);
-        if (existingStyle) existingStyle.remove();
-        
-        const themeStyle = document.createElement('style');
-        themeStyle.id = themeStyleId;
-        
-        if (theme === 'dark') {{
-            root.setAttribute('data-theme', 'dark');
-            root.className = root.className.replace(/light|light-theme/g, '') + ' dark dark-theme';
-            document.body.className = document.body.className.replace(/light|light-theme/g, '') + ' dark dark-theme';
-            
-            themeStyle.textContent = `
-                /* Global dark theme override */
-                :root {{
-                    color-scheme: dark !important;
-                    --bg-color: #1a1a1a !important;
-                    --text-color: #ffffff !important;
+        // 3. FORCE all DOM elements
+        const elementsToForce = [document.documentElement, document.body, ...document.querySelectorAll('*')];
+        elementsToForce.forEach(el => {{
+            if (el && el.style) {{
+                // Remove opposing theme classes
+                if (theme === 'dark') {{
+                    el.classList.remove('light', 'light-theme', 'light-mode');
+                    el.classList.add('dark', 'dark-theme', 'dark-mode');
+                }} else {{
+                    el.classList.remove('dark', 'dark-theme', 'dark-mode');
+                    el.classList.add('light', 'light-theme', 'light-mode');
                 }}
                 
-                html, body {{
-                    background: #1a1a1a !important;
-                    background-color: #1a1a1a !important;
-                    color: #ffffff !important;
-                }}
+                // Set attributes
+                el.setAttribute('data-theme', theme);
+                el.setAttribute('data-color-scheme', theme);
                 
-                /* Target video and canvas elements specifically */
-                video, canvas, .video-container, .translation-area, 
-                [class*="video"], [class*="player"], [class*="media"],
-                .sign-video, .output-video, .result-video {{
-                    background: #1a1a1a !important;
-                    background-color: #1a1a1a !important;
-                }}
-                
-                /* Override any containers that might affect video background */
-                div, section, main, .container, .content {{
-                    background-color: #1a1a1a !important;
-                }}
-                
-                /* Force dark theme on all elements */
-                * {{
-                    color-scheme: dark !important;
-                }}
-            `;
-        }} else {{
-            root.setAttribute('data-theme', 'light');
-            root.className = root.className.replace(/dark|dark-theme/g, '') + ' light light-theme';
-            document.body.className = document.body.className.replace(/dark|dark-theme/g, '') + ' light light-theme';
-            
-            themeStyle.textContent = `
-                /* Global light theme override */
-                :root {{
-                    color-scheme: light !important;
-                    --bg-color: #ffffff !important;
-                    --text-color: #000000 !important;
-                }}
-                
-                html, body {{
-                    background: #ffffff !important;
-                    background-color: #ffffff !important;
-                    color: #000000 !important;
-                }}
-                
-                /* Target video and canvas elements specifically */
-                video, canvas, .video-container, .translation-area,
-                [class*="video"], [class*="player"], [class*="media"],
-                .sign-video, .output-video, .result-video {{
-                    background: #ffffff !important;
-                    background-color: #ffffff !important;
-                }}
-                
-                /* Override any containers that might affect video background */
-                div, section, main, .container, .content {{
-                    background-color: #ffffff !important;
-                }}
-                
-                /* Force light theme on all elements */
-                * {{
-                    color-scheme: light !important;
-                }}
-            `;
-        }}
-        
-        document.head.appendChild(themeStyle);
-        console.log('Theme CSS applied:', theme);
-        
-        // Method 4: Try to trigger media queries
-        if (window.matchMedia) {{
-            const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
-            const lightModeQuery = window.matchMedia('(prefers-color-scheme: light)');
-            
-            // Manually trigger media query listeners if they exist
-            if (theme === 'dark' && darkModeQuery.listeners) {{
-                darkModeQuery.listeners.forEach(listener => listener({{ matches: true }}));
-            }} else if (theme === 'light' && lightModeQuery.listeners) {{
-                lightModeQuery.listeners.forEach(listener => listener({{ matches: true }}));
+                // Set CSS variables
+                el.style.setProperty('--theme', theme);
+                el.style.setProperty('--color-scheme', theme);
+                el.style.setProperty('--prefers-color-scheme', theme);
             }}
-        }}
+        }});
         
-                 return {{ theme, themeSet }};
+        // 4. NUCLEAR CSS injection
+        const nuclearStyleId = 'nuclear-theme-override';
+        const existingNuclear = document.getElementById(nuclearStyleId);
+        if (existingNuclear) existingNuclear.remove();
+        
+        const nuclearStyle = document.createElement('style');
+        nuclearStyle.id = nuclearStyleId;
+        
+        const bgColor = theme === 'dark' ? '#000000' : '#ffffff';
+        const textColor = theme === 'dark' ? '#ffffff' : '#000000';
+        
+        nuclearStyle.textContent = `
+            /* NUCLEAR THEME OVERRIDE - CANNOT BE OVERRIDDEN */
+            html, html *, body, body *, 
+            div, div *, section, section *, main, main *,
+            video, canvas, iframe,
+            .container, .container *,
+            .content, .content *,
+            .app, .app *,
+            .page, .page *,
+            [class*="video"], [class*="video"] *,
+            [class*="player"], [class*="player"] *,
+            [class*="media"], [class*="media"] *,
+            [class*="sign"], [class*="sign"] *,
+            [class*="translation"], [class*="translation"] *,
+            [class*="output"], [class*="output"] *,
+            [class*="result"], [class*="result"] * {{
+                background: ${{bgColor}} !important;
+                background-color: ${{bgColor}} !important;
+                color: ${{textColor}} !important;
+                color-scheme: ${{theme}} !important;
+                border-color: ${{theme === 'dark' ? '#333' : '#ccc'}} !important;
+            }}
+            
+            /* Override ALL possible theme classes */
+            .light, .light *, .light-theme, .light-theme *, .light-mode, .light-mode *,
+            .dark, .dark *, .dark-theme, .dark-theme *, .dark-mode, .dark-mode *,
+            [data-theme="light"], [data-theme="light"] *,
+            [data-theme="dark"], [data-theme="dark"] *,
+            [data-color-scheme="light"], [data-color-scheme="light"] *,
+            [data-color-scheme="dark"], [data-color-scheme="dark"] * {{
+                background: ${{bgColor}} !important;
+                background-color: ${{bgColor}} !important;
+                color: ${{textColor}} !important;
+            }}
+            
+            /* Media query override */
+            @media (prefers-color-scheme: dark) {{
+                *, *::before, *::after {{
+                    background: ${{bgColor}} !important;
+                    background-color: ${{bgColor}} !important;
+                    color: ${{textColor}} !important;
+                }}
+            }}
+            
+            @media (prefers-color-scheme: light) {{
+                *, *::before, *::after {{
+                    background: ${{bgColor}} !important;
+                    background-color: ${{bgColor}} !important;
+                    color: ${{textColor}} !important;
+                }}
+            }}
+        `;
+        
+        document.head.appendChild(nuclearStyle);
+        
+        // 5. Force inline styles on EVERYTHING
+        setTimeout(() => {{
+            document.querySelectorAll('*').forEach(el => {{
+                if (el && el.style) {{
+                    el.style.setProperty('background-color', bgColor, 'important');
+                    el.style.setProperty('background', bgColor, 'important');
+                    el.style.setProperty('color', textColor, 'important');
+                }}
+            }});
+        }}, 100);
+        
+        console.log('NUCLEAR theme application completed for:', theme);
+        return {{ theme, themeSet, nuclear: true }};
     }}, useTheme);
     
-    // Wait longer for theme to apply and DOM to update
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // Wait even longer for the nuclear theme to take effect
+    await new Promise(resolve => setTimeout(resolve, 4000));
     
     // Find and fill text input
     const textInput = await page.waitForSelector('textarea, input[type="text"]');
