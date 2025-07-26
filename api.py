@@ -83,7 +83,7 @@ translations: Dict[str, Dict[str, Any]] = {}
 # Pydantic models
 class TranslationRequest(BaseModel):
     text: str
-    theme: Optional[str] = None  # 'dark', 'light', or None for auto-detect
+    theme: Optional[str] = "auto"  # 'dark', 'light', or 'auto' for auto-detect
     
     @field_validator('text')
     @classmethod
@@ -98,8 +98,8 @@ class TranslationRequest(BaseModel):
     @field_validator('theme')
     @classmethod
     def validate_theme(cls, v):
-        if v is not None and v not in ['dark', 'light']:
-            raise ValueError('Theme must be "dark", "light", or null for auto-detect')
+        if v is not None and v not in ['dark', 'light', 'auto']:
+            raise ValueError('Theme must be "dark", "light", or "auto" for auto-detect')
         return v
 
 class TranslationResponse(BaseModel):
@@ -231,81 +231,158 @@ export default async ({{ page }}) => {{
     await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
     await new Promise(resolve => setTimeout(resolve, 3000));
     
-    // Detect or set theme
+    // Detect system theme preference automatically
+    const systemTheme = await page.evaluate(() => {{
+        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }});
+    
+    // Use auto-detected theme if theme is 'auto' or not specified
     let useTheme = '{theme}';
-    if (!useTheme || useTheme === 'None') {{
-        // Auto-detect system preference
-        useTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    if (!useTheme || useTheme === 'None' || useTheme === 'auto') {{
+        useTheme = systemTheme;
     }}
     
-    // Apply theme to the website
+    console.log('Applying theme:', useTheme, '(system detected:', systemTheme + ')');
+    
+    // Apply theme to the website - comprehensive approach
     await page.evaluate((theme) => {{
-        // Try to find theme toggle buttons or elements
-        const themeButtons = document.querySelectorAll('[data-theme], .theme-toggle, .dark-mode-toggle, [class*="theme"], [class*="dark"]');
+        console.log('Setting theme to:', theme);
         
-        // Apply theme via CSS and data attributes
-        document.documentElement.setAttribute('data-theme', theme);
-        document.body.setAttribute('data-theme', theme);
+        // Method 1: Look for existing theme toggles and click them
+        const themeButtons = document.querySelectorAll(`
+            button[data-theme="${{theme}}"],
+            button[aria-label*="${{theme}}"],
+            .theme-toggle,
+            .dark-mode-toggle,
+            [class*="theme-"],
+            [class*="dark-"],
+            [class*="light-"]
+        `);
         
-        // Set common theme classes
-        if (theme === 'dark') {{
-            document.documentElement.classList.add('dark', 'dark-theme', 'dark-mode');
-            document.documentElement.classList.remove('light', 'light-theme', 'light-mode');
-            document.body.classList.add('dark', 'dark-theme', 'dark-mode');
-            document.body.classList.remove('light', 'light-theme', 'light-mode');
-        }} else {{
-            document.documentElement.classList.add('light', 'light-theme', 'light-mode');
-            document.documentElement.classList.remove('dark', 'dark-theme', 'dark-mode');
-            document.body.classList.add('light', 'light-theme', 'light-mode');
-            document.body.classList.remove('dark', 'dark-theme', 'dark-mode');
-        }}
-        
-        // Try to trigger theme toggles if they exist
+        // Try clicking theme buttons
+        let themeSet = false;
         themeButtons.forEach(btn => {{
-            if (btn.textContent.toLowerCase().includes(theme) || 
-                btn.getAttribute('data-theme') === theme) {{
+            const btnText = btn.textContent?.toLowerCase() || '';
+            const btnClass = btn.className?.toLowerCase() || '';
+            const btnData = btn.getAttribute('data-theme') || '';
+            
+            if (btnText.includes(theme) || btnClass.includes(theme) || btnData === theme) {{
+                console.log('Clicking theme button:', btn);
                 btn.click();
+                themeSet = true;
             }}
         }});
         
-        // Apply custom CSS for consistent theming
+        // Method 2: Set CSS custom properties and variables
+        const root = document.documentElement;
+        root.style.setProperty('--theme', theme);
+        root.style.setProperty('--color-scheme', theme);
+        
+        // Method 3: Apply comprehensive CSS theming
+        const themeStyleId = 'sign-theme-override';
+        let existingStyle = document.getElementById(themeStyleId);
+        if (existingStyle) existingStyle.remove();
+        
         const themeStyle = document.createElement('style');
+        themeStyle.id = themeStyleId;
+        
         if (theme === 'dark') {{
+            root.setAttribute('data-theme', 'dark');
+            root.className = root.className.replace(/light|light-theme/g, '') + ' dark dark-theme';
+            document.body.className = document.body.className.replace(/light|light-theme/g, '') + ' dark dark-theme';
+            
             themeStyle.textContent = `
-                * {{ 
-                    color-scheme: dark !important; 
+                /* Global dark theme override */
+                :root {{
+                    color-scheme: dark !important;
+                    --bg-color: #1a1a1a !important;
+                    --text-color: #ffffff !important;
                 }}
-                body, html, .video-container, .translation-area {{
-                    background-color: #1a1a1a !important;
+                
+                html, body {{
                     background: #1a1a1a !important;
+                    background-color: #1a1a1a !important;
                     color: #ffffff !important;
                 }}
-                video, canvas {{
-                    background-color: #1a1a1a !important;
+                
+                /* Target video and canvas elements specifically */
+                video, canvas, .video-container, .translation-area, 
+                [class*="video"], [class*="player"], [class*="media"],
+                .sign-video, .output-video, .result-video {{
                     background: #1a1a1a !important;
+                    background-color: #1a1a1a !important;
+                }}
+                
+                /* Override any containers that might affect video background */
+                div, section, main, .container, .content {{
+                    background-color: #1a1a1a !important;
+                }}
+                
+                /* Force dark theme on all elements */
+                * {{
+                    color-scheme: dark !important;
                 }}
             `;
         }} else {{
+            root.setAttribute('data-theme', 'light');
+            root.className = root.className.replace(/dark|dark-theme/g, '') + ' light light-theme';
+            document.body.className = document.body.className.replace(/dark|dark-theme/g, '') + ' light light-theme';
+            
             themeStyle.textContent = `
-                * {{ 
-                    color-scheme: light !important; 
+                /* Global light theme override */
+                :root {{
+                    color-scheme: light !important;
+                    --bg-color: #ffffff !important;
+                    --text-color: #000000 !important;
                 }}
-                body, html, .video-container, .translation-area {{
-                    background-color: #ffffff !important;
+                
+                html, body {{
                     background: #ffffff !important;
+                    background-color: #ffffff !important;
                     color: #000000 !important;
                 }}
-                video, canvas {{
-                    background-color: #ffffff !important;
+                
+                /* Target video and canvas elements specifically */
+                video, canvas, .video-container, .translation-area,
+                [class*="video"], [class*="player"], [class*="media"],
+                .sign-video, .output-video, .result-video {{
                     background: #ffffff !important;
+                    background-color: #ffffff !important;
+                }}
+                
+                /* Override any containers that might affect video background */
+                div, section, main, .container, .content {{
+                    background-color: #ffffff !important;
+                }}
+                
+                /* Force light theme on all elements */
+                * {{
+                    color-scheme: light !important;
                 }}
             `;
         }}
+        
         document.head.appendChild(themeStyle);
+        console.log('Theme CSS applied:', theme);
+        
+        // Method 4: Try to trigger media queries
+        if (window.matchMedia) {{
+            const darkModeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+            const lightModeQuery = window.matchMedia('(prefers-color-scheme: light)');
+            
+            // Manually trigger media query listeners if they exist
+            if (theme === 'dark' && darkModeQuery.listeners) {{
+                darkModeQuery.listeners.forEach(listener => listener({{ matches: true }}));
+            }} else if (theme === 'light' && lightModeQuery.listeners) {{
+                lightModeQuery.listeners.forEach(listener => listener({{ matches: true }}));
+            }}
+        }}
+        
+        return {{ theme, themeSet, systemDetected: window.matchMedia('(prefers-color-scheme: dark)').matches }};
     }}, useTheme);
     
-    // Wait for theme to apply
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Wait longer for theme to apply and DOM to update
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
     // Find and fill text input
     const textInput = await page.waitForSelector('textarea, input[type="text"]');

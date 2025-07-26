@@ -83,9 +83,9 @@
         <div>
             <input type="text" id="textInput" placeholder="Enter text to translate to sign language..." value="hello world">
             <select id="themeSelect">
-                <option value="">Auto-detect system theme</option>
-                <option value="light">Light theme</option>
-                <option value="dark">Dark theme</option>
+                <option value="auto" selected>🔄 Auto-detect system theme</option>
+                <option value="light">☀️ Force light theme</option>
+                <option value="dark">🌙 Force dark theme</option>
             </select>
             <button id="translateBtn" onclick="startTranslation()">Translate to Sign Language</button>
         </div>
@@ -124,12 +124,19 @@
             document.getElementById('videoContainer').innerHTML = '';
 
             try {
-                const themeText = theme ? ` (${theme} theme)` : ' (auto-detect theme)';
+                let themeText;
+                if (theme === 'auto' || !theme) {
+                    themeText = ' (auto-detecting theme)';
+                } else {
+                    themeText = ` (${theme} theme)`;
+                }
                 showLoading(`Starting translation${themeText}...`);
                 
                 const requestBody = { text: text };
-                if (theme) {
+                if (theme && theme !== 'auto') {
                     requestBody.theme = theme;
+                } else {
+                    requestBody.theme = 'auto'; // Explicitly set auto for system detection
                 }
                 
                 const response = await fetch(`${API_BASE}/api/translate`, {
@@ -213,8 +220,13 @@
             try {
                 const response = await fetch(`${API_BASE}/health`);
                 const data = await response.json();
+                
+                // Detect and show system theme
+                const systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                const themeIcon = systemTheme === 'dark' ? '🌙' : '☀️';
+                
                 if (response.ok) {
-                    showResult(`✅ API is healthy and ready! Status: ${data.status}`, 'success');
+                    showResult(`✅ API is healthy and ready! ${themeIcon} System theme: ${systemTheme}`, 'success');
                 } else {
                     showResult('❌ API health check failed', 'error');
                 }
