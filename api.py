@@ -83,6 +83,7 @@ translations: Dict[str, Dict[str, Any]] = {}
 # Pydantic models
 class TranslationRequest(BaseModel):
     text: str
+    theme: Optional[str] = None  # 'dark', 'light', or None for auto-detect
     
     @field_validator('text')
     @classmethod
@@ -92,6 +93,13 @@ class TranslationRequest(BaseModel):
             raise ValueError('Text cannot be empty')
         if len(v) > config.MAX_TEXT_LENGTH:
             raise ValueError(f'Text too long (max {config.MAX_TEXT_LENGTH} characters)')
+        return v
+    
+    @field_validator('theme')
+    @classmethod
+    def validate_theme(cls, v):
+        if v is not None and v not in ['dark', 'light']:
+            raise ValueError('Theme must be "dark", "light", or null for auto-detect')
         return v
 
 class TranslationResponse(BaseModel):
@@ -216,12 +224,88 @@ class BrowserlessAutomation:
     def __init__(self):
         self.base_url = config.BROWSERLESS_URL or "http://localhost:3000"
     
-    async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
+    async def translate_text_to_sign(self, text: str, theme: Optional[str] = None) -> Optional[bytes]:
         """Use browserless.io or similar service for browser automation"""
         script = f'''
 export default async ({{ page }}) => {{
     await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
     await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    // Detect or set theme
+    let useTheme = '{theme}';
+    if (!useTheme || useTheme === 'None') {{
+        // Auto-detect system preference
+        useTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }}
+    
+    // Apply theme to the website
+    await page.evaluate((theme) => {{
+        // Try to find theme toggle buttons or elements
+        const themeButtons = document.querySelectorAll('[data-theme], .theme-toggle, .dark-mode-toggle, [class*="theme"], [class*="dark"]');
+        
+        // Apply theme via CSS and data attributes
+        document.documentElement.setAttribute('data-theme', theme);
+        document.body.setAttribute('data-theme', theme);
+        
+        // Set common theme classes
+        if (theme === 'dark') {{
+            document.documentElement.classList.add('dark', 'dark-theme', 'dark-mode');
+            document.documentElement.classList.remove('light', 'light-theme', 'light-mode');
+            document.body.classList.add('dark', 'dark-theme', 'dark-mode');
+            document.body.classList.remove('light', 'light-theme', 'light-mode');
+        }} else {{
+            document.documentElement.classList.add('light', 'light-theme', 'light-mode');
+            document.documentElement.classList.remove('dark', 'dark-theme', 'dark-mode');
+            document.body.classList.add('light', 'light-theme', 'light-mode');
+            document.body.classList.remove('dark', 'dark-theme', 'dark-mode');
+        }}
+        
+        // Try to trigger theme toggles if they exist
+        themeButtons.forEach(btn => {{
+            if (btn.textContent.toLowerCase().includes(theme) || 
+                btn.getAttribute('data-theme') === theme) {{
+                btn.click();
+            }}
+        }});
+        
+        // Apply custom CSS for consistent theming
+        const themeStyle = document.createElement('style');
+        if (theme === 'dark') {{
+            themeStyle.textContent = `
+                * {{ 
+                    color-scheme: dark !important; 
+                }}
+                body, html, .video-container, .translation-area {{
+                    background-color: #1a1a1a !important;
+                    background: #1a1a1a !important;
+                    color: #ffffff !important;
+                }}
+                video, canvas {{
+                    background-color: #1a1a1a !important;
+                    background: #1a1a1a !important;
+                }}
+            `;
+        }} else {{
+            themeStyle.textContent = `
+                * {{ 
+                    color-scheme: light !important; 
+                }}
+                body, html, .video-container, .translation-area {{
+                    background-color: #ffffff !important;
+                    background: #ffffff !important;
+                    color: #000000 !important;
+                }}
+                video, canvas {{
+                    background-color: #ffffff !important;
+                    background: #ffffff !important;
+                }}
+            `;
+        }}
+        document.head.appendChild(themeStyle);
+    }}, useTheme);
+    
+    // Wait for theme to apply
+    await new Promise(resolve => setTimeout(resolve, 1000));
     
     // Find and fill text input
     const textInput = await page.waitForSelector('textarea, input[type="text"]');
@@ -325,7 +409,7 @@ class SeleniumGridAutomation:
     def __init__(self):
         self.grid_url = config.SELENIUM_GRID_URL or "http://localhost:4444/wd/hub"
     
-    async def translate_text_to_sign(self, text: str) -> Optional[bytes]:
+    async def translate_text_to_sign(self, text: str, theme: Optional[str] = None) -> Optional[bytes]:
         """Use Selenium Grid for browser automation"""
         try:
             from selenium import webdriver
@@ -453,16 +537,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-async def process_translation_async(translation_id: str, text: str):
+async def process_translation_async(translation_id: str, text: str, theme: Optional[str] = None):
     """Process translation in background"""
     try:
-        logger.info(f"Processing translation {translation_id}: {text}")
+        logger.info(f"Processing translation {translation_id}: {text} (theme: {theme})")
         
         if not automation_backend:
             raise Exception("No browser automation backend available")
         
         # Perform the translation
-        video_content = await automation_backend.translate_text_to_sign(text)
+        video_content = await automation_backend.translate_text_to_sign(text, theme)
         
         if not video_content:
             raise Exception("Failed to generate video content")
@@ -506,17 +590,19 @@ async def translate_text(request: TranslationRequest, background_tasks: Backgrou
         )
     
     text = request.text
+    theme = request.theme
     translation_id = str(uuid.uuid4())
     
     await StateManager.set_translation(translation_id, {
         'status': 'processing',
         'text': text,
+        'theme': theme,
         'file_path': None,
         'error': None,
         'created_at': time.time()
     })
 
-    background_tasks.add_task(process_translation_async, translation_id, text)
+    background_tasks.add_task(process_translation_async, translation_id, text, theme)
 
     return TranslationResponse(
         translation_id=translation_id,

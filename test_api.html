@@ -22,13 +22,14 @@
             color: #333;
             text-align: center;
         }
-        input, button {
+        input, button, select {
             width: 100%;
             padding: 12px;
             margin: 10px 0;
             border: 1px solid #ddd;
             border-radius: 5px;
             box-sizing: border-box;
+            font-size: 14px;
         }
         button {
             background-color: #007bff;
@@ -81,6 +82,11 @@
         
         <div>
             <input type="text" id="textInput" placeholder="Enter text to translate to sign language..." value="hello world">
+            <select id="themeSelect">
+                <option value="">Auto-detect system theme</option>
+                <option value="light">Light theme</option>
+                <option value="dark">Dark theme</option>
+            </select>
             <button id="translateBtn" onclick="startTranslation()">Translate to Sign Language</button>
         </div>
 
@@ -105,6 +111,7 @@
 
         async function startTranslation() {
             const text = document.getElementById('textInput').value.trim();
+            const theme = document.getElementById('themeSelect').value;
             const btn = document.getElementById('translateBtn');
             
             if (!text) {
@@ -117,14 +124,20 @@
             document.getElementById('videoContainer').innerHTML = '';
 
             try {
-                showLoading('Starting translation...');
+                const themeText = theme ? ` (${theme} theme)` : ' (auto-detect theme)';
+                showLoading(`Starting translation${themeText}...`);
+                
+                const requestBody = { text: text };
+                if (theme) {
+                    requestBody.theme = theme;
+                }
                 
                 const response = await fetch(`${API_BASE}/api/translate`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ text: text })
+                    body: JSON.stringify(requestBody)
                 });
 
                 const data = await response.json();
