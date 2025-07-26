@@ -83,7 +83,7 @@ translations: Dict[str, Dict[str, Any]] = {}
 # Pydantic models
 class TranslationRequest(BaseModel):
     text: str
-    theme: Optional[str] = "auto"  # 'dark', 'light', or 'auto' for auto-detect
+    theme: Optional[str] = None  # 'dark' or 'light' (auto-detection happens client-side)
     
     @field_validator('text')
     @classmethod
@@ -98,8 +98,8 @@ class TranslationRequest(BaseModel):
     @field_validator('theme')
     @classmethod
     def validate_theme(cls, v):
-        if v is not None and v not in ['dark', 'light', 'auto']:
-            raise ValueError('Theme must be "dark", "light", or "auto" for auto-detect')
+        if v is not None and v not in ['dark', 'light']:
+            raise ValueError('Theme must be "dark" or "light" (auto-detection happens client-side)')
         return v
 
 class TranslationResponse(BaseModel):
@@ -231,18 +231,14 @@ export default async ({{ page }}) => {{
     await page.goto('https://sign.mt/', {{ waitUntil: 'networkidle2' }});
     await new Promise(resolve => setTimeout(resolve, 3000));
     
-    // Detect system theme preference automatically
-    const systemTheme = await page.evaluate(() => {{
-        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }});
-    
-    // Use auto-detected theme if theme is 'auto' or not specified
+    // Use the theme provided by client (already detected on user's browser)
     let useTheme = '{theme}';
-    if (!useTheme || useTheme === 'None' || useTheme === 'auto') {{
-        useTheme = systemTheme;
+    if (!useTheme || useTheme === 'None' || useTheme === 'null') {{
+        // Fallback to light if somehow no theme is provided
+        useTheme = 'light';
     }}
     
-    console.log('Applying theme:', useTheme, '(system detected:', systemTheme + ')');
+    console.log('Applying client-provided theme:', useTheme);
     
     // Apply theme to the website - comprehensive approach
     await page.evaluate((theme) => {{
@@ -378,7 +374,7 @@ export default async ({{ page }}) => {{
             }}
         }}
         
-        return {{ theme, themeSet, systemDetected: window.matchMedia('(prefers-color-scheme: dark)').matches }};
+                 return {{ theme, themeSet }};
     }}, useTheme);
     
     // Wait longer for theme to apply and DOM to update
@@ -667,7 +663,7 @@ async def translate_text(request: TranslationRequest, background_tasks: Backgrou
         )
     
     text = request.text
-    theme = request.theme
+    theme = request.theme or 'light'  # Default to light if no theme provided
     translation_id = str(uuid.uuid4())
     
     await StateManager.set_translation(translation_id, {

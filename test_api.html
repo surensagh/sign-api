@@ -124,20 +124,23 @@
             document.getElementById('videoContainer').innerHTML = '';
 
             try {
-                let themeText;
+                // Detect theme on CLIENT side (your browser) not server side
+                let actualTheme;
                 if (theme === 'auto' || !theme) {
-                    themeText = ' (auto-detecting theme)';
+                    // Detect YOUR system theme, not the server's theme
+                    actualTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                    console.log('Client-side theme detection:', actualTheme);
                 } else {
-                    themeText = ` (${theme} theme)`;
+                    actualTheme = theme;
                 }
+                
+                const themeText = theme === 'auto' ? ` (auto-detected: ${actualTheme})` : ` (${actualTheme} theme)`;
                 showLoading(`Starting translation${themeText}...`);
                 
-                const requestBody = { text: text };
-                if (theme && theme !== 'auto') {
-                    requestBody.theme = theme;
-                } else {
-                    requestBody.theme = 'auto'; // Explicitly set auto for system detection
-                }
+                const requestBody = { 
+                    text: text,
+                    theme: actualTheme  // Always send actual theme (dark/light)
+                };
                 
                 const response = await fetch(`${API_BASE}/api/translate`, {
                     method: 'POST',
